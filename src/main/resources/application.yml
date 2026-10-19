@@ -7,6 +7,10 @@ spring:
     url: jdbc:postgresql://localhost:5432/eia_policy
     username: postgres
     password: postgres
+    hikari:
+      maximum-pool-size: 3
+      minimum-idle: 1
+      connection-timeout: 30000
   sql:
     init:
       mode: always
@@ -15,3 +19,4 @@ management:
     web:
       exposure:
         include: health,info
+
