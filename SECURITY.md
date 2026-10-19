@@ -1,15 +1,7 @@
 # Security policy
 
-## Reporting a vulnerability
+Report vulnerabilities through GitHub private vulnerability reporting on this repository, or email `security@eia-open-insurance.org`.
 
-Report suspected vulnerabilities to `security@eia-platform.example`. Do not open a public issue.
+Do not open a public issue for a suspected vulnerability.
 
-Include the repository, affected version or commit, reproduction steps, impact, and any suggested remediation.
-
-## Response
-
-The security team acknowledges within two business days and provides a remediation plan for confirmed findings. Critical findings are handled under the incident process.
-
-## Scope
-
-This repository is part of the EIA platform. Do not test against production without written authorization.
+See the project-wide [security policy](https://github.com/eia-open-insurance/eia/blob/main/SECURITY.md).

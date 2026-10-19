@@ -1,21 +1,12 @@
 # Contributing
 
-## Workflow
+This repository is part of [EIA Open Insurance](https://github.com/eia-open-insurance).
 
-1. Create a short-lived branch from `main`.
-2. Make the change with tests.
-3. Open a pull request.
-4. Obtain CODEOWNERS approval and pass required checks.
-5. Squash merge to `main`.
+Read the project-wide guide:
 
-## Standards
+- [Contributing](https://github.com/eia-open-insurance/eia/blob/main/CONTRIBUTING.md)
+- [Code of Conduct](https://github.com/eia-open-insurance/eia/blob/main/CODE_OF_CONDUCT.md)
+- [Governance](https://github.com/eia-open-insurance/eia/blob/main/GOVERNANCE.md)
+- [Security](https://github.com/eia-open-insurance/eia/blob/main/SECURITY.md)
 
-- Follow the repository standard in `../CONVENTIONS.md`.
-- Keep one deployable component per repository.
-- No business logic in shared libraries or front-end remotes.
-- Update `CHANGELOG.md`.
-- Sign commits.
-
-## Required checks
-
-Lint, unit tests, contract tests, integration or Playwright tests where applicable, security scan, SBOM, and build.
+Use `git commit -s` to certify the Developer Certificate of Origin. There is no CLA.

@@ -1,7 +1,7 @@
 replicaCount: 2
 
 image:
-  repository: ghcr.io/eia-platform/eia-policy-expert
+  repository: ghcr.io/eia-open-insurance/eia-policy-expert
   tag: "0.1.0"
   pullPolicy: IfNotPresent
 
