@@ -15,24 +15,74 @@ Policy persistence, invariants, read models, batch jobs, Quartz schedules, and o
 
 ## Implemented slice
 
-The first vertical slice persists the `policy` aggregate with `policy_number`, `product_code`, `insured_party_id`, `status`, `effective_date`, `expiration_date`, `premium_amount`, `premium_currency`, `limit_amount`, `limit_currency`, `version`, and audit timestamps. It enforces the policy period, non-negative premium and limit, and the SPEC policy status lifecycle.
+The second vertical slice keeps the first-slice `policy` aggregate and adds the
+contract structures from SPEC 11.2:
 
-Persistence also stores create idempotency in `policy_idempotency`
-(`tenant_id`, `idempotency_key`, `request_hash`, `policy_id`, `created_at`) with
-the unique constraint `(tenant_id, idempotency_key)`. The key and the policy are
-written in one transaction; a replay returns the original policy and a reuse
-with a different request returns `409 IDEMPOTENCY_CONFLICT`.
+- `policy_version`: immutable versions with `version_number`,
+  `policy_version_number`, `change_type`, `status`, effective dates, `issued_at`,
+  `issued_by`, `approved_by`, `premium_delta_amount`, `supersedes_version_id`,
+  and `immutable_hash`. A partial unique index allows one `ISSUED` version per
+  policy; the current version is derived from that row and its canonical SHA-256
+  hash is recomputed on read.
+- `policy_coverage` and `policy_limit`: coverage code/part/occurrence basis plus
+  per-occurrence, aggregate, sublimit, deductible, coinsurance, currency, and
+  effective dates, all constrained to the policy term.
+- `policy_limit_state` and `policy_limit_erosion`: an idempotent erosion ledger.
+  Facts are unique by `(limit, claim, allocation, source_version)`; the highest
+  source version per claim/allocation chain wins, and a fact that would take the
+  aggregate negative is rejected with the available amount.
+- `policy_endorsement`: numbered endorsements that each issue a policy version.
+  A backdated endorsement needs a reason and an approval.
+- `policy_insured` and `policy_location`: parties, roles, addresses, state,
+  country, and location codes. At least one ACTIVE named insured is required
+  before `ISSUED`.
+- `policy_cancellation` and `policy_reinstatement`: notice, reason, effective
+  date, pro-rata return premium, and a reinstatement gate that requires an
+  approval and documented premium evidence.
+
+Every second-slice mutation accepts an optional `If-Match` strong entity tag
+(the aggregate `version`), returns the new `ETag`, and accepts an optional
+`Idempotency-Key` scoped by tenant and command type. A replay returns `200` with
+`Idempotent-Replayed: true`; reuse with a different request is `409
+IDEMPOTENCY_CONFLICT`.
+
+### Second-slice endpoints
+
+All paths preserve the first-slice surface and are additive under
+`/internal/v1/policies/{policyId}`:
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/versions` | Version history (page envelope) |
+| `GET` | `/versions/current` | Derived current version with `hashVerified` |
+| `GET` | `/versions/{versionId}` | One version snapshot |
+| `GET`/`POST` | `/coverages` | Coverage list / add coverage with limit schedule |
+| `GET` | `/limits` | Limit schedules |
+| `GET` | `/aggregate-state` | Erosion state per limit |
+| `POST` | `/erosion` | Apply an idempotent erosion fact |
+| `GET`/`POST` | `/endorsements` | Endorsement list / endorse |
+| `GET` | `/endorsements/{endorsementId}` | One endorsement |
+| `GET`/`POST` | `/insureds` | Insured list / add insured |
+| `GET`/`POST` | `/locations` | Location list / add location |
+| `GET` | `/cancellations` | Cancellation history |
+| `POST` | `/cancel` | Cancel with computed return premium |
+| `GET` | `/reinstatements` | Reinstatement history |
+| `POST` | `/reinstate` | Reinstate with approval and premium evidence |
 
 ## Cross-cutting API behavior
 
 - Errors are canonical `application/problem+json` (SPEC 6.11 / 12.2) with
-  `errors[{field, code, message}]`, `meta`, and a correlation id.
+  `errors[{field, code, message}]`, `meta`, and a correlation id. Business-rule
+  failures are `422`; missing approvals are `428`; state and version conflicts
+  are `409`; not-found resources are `404`.
 - `GET /internal/v1/policies` accepts `page` (default 0) and `size` (default 20,
   maximum 100) and returns `{items, page, size, total, _links}` with stable
-  `updated_at DESC, id ASC` ordering.
-- Detail responses carry `ETag: "<version>"`; `PATCH /{id}/status` accepts
-  `If-Match` with precedence over the compatibility `expectedVersion` body
-  field. Stale versions are `409 CONCURRENT_MODIFICATION`.
+  `updated_at DESC, id ASC` ordering. Sub-resource collections use the same
+  envelope and are ordered by version, sequence, or creation time.
+- Detail and mutation responses carry `ETag: "<version>"`; every mutation
+  accepts `If-Match` with precedence over the compatibility `expectedVersion`
+  body field on status changes. Stale versions are `409
+  CONCURRENT_MODIFICATION`.
 - `POST /internal/v1/policies` accepts `Idempotency-Key`; the first create is
   `201`, a replay is `200` with `Idempotent-Replayed: true`.
 
@@ -46,12 +96,23 @@ $env:JAVA_HOME='C:\Program Files\Eclipse Adoptium\jdk-22.0.2.9-hotspot'
 .\gradlew.bat bootRun
 ```
 
-The service listens on port 8083. `schema.sql` creates the tables and sequences on startup.
+The service listens on port 8083. `schema.sql` creates the tables and sequences on startup and is idempotent.
 
-- `GET /internal/v1/policies?tenantId={tenantId}&page=0&size=20`
-- `GET /internal/v1/policies/{id}?tenantId={tenantId}`
-- `POST /internal/v1/policies` (`Idempotency-Key` optional)
-- `PATCH /internal/v1/policies/{id}/status?tenantId={tenantId}` (`If-Match` optional)
+### Live PostgreSQL smoke
+
+`LivePostgresSmokeTest` is skipped unless `EIA_LIVE_PG=true`. It starts the real
+service against PostgreSQL and drives create -> named insured -> issue ->
+coverage -> endorsement -> erosion -> cancellation -> reinstatement over HTTP,
+asserting the version/hash invariants, ETag/If-Match, idempotency replay, and the
+computed return premium.
+
+```powershell
+$env:EIA_LIVE_PG='true'
+.\gradlew.bat test --tests '*LivePostgresSmokeTest*'
+```
+
+`EIA_LIVE_PG_URL`, `EIA_LIVE_PG_USER`, and `EIA_LIVE_PG_PASSWORD` override the
+connection; rows are tenant-scoped and removed by the test.
 
 ## Responsibilities
 

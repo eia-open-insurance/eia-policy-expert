@@ -51,6 +51,9 @@ class PolicyControllerTest {
     @MockitoBean
     private PolicyRepository repository;
 
+    @MockitoBean
+    private PolicyVersionService versionService;
+
     @Test
     void listsPoliciesWithDefaultPageEnvelope() throws Exception {
         when(repository.findPage(TENANT, 0, 20))
@@ -330,6 +333,26 @@ class PolicyControllerTest {
                 .andExpect(jsonPath("$.errors[0].code").value("MIN_VALUE"));
 
         verifyNoInteractions(repository);
+    }
+
+    @Test
+    void refusesToIssueWithoutANamedInsured() throws Exception {
+        when(repository.findById(TENANT, POLICY_ID)).thenReturn(Optional.of(policy("BOUND", 3)));
+        when(repository.countNamedInsured(TENANT, POLICY_ID)).thenReturn(0);
+
+        mvc.perform(patch("/internal/v1/policies/{id}/status", POLICY_ID)
+                        .param("tenantId", TENANT.toString())
+                        .header("If-Match", "\"3\"")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"status":"ISSUED"}
+                                """))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.code").value("NAMED_INSURED_REQUIRED"))
+                .andExpect(jsonPath("$.category").value("BUSINESS_RULE"));
+
+        verify(repository, never()).updateStatus(any(), any(), any(), any(), anyInt());
     }
 
     @Test

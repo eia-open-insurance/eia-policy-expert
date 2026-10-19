@@ -125,6 +125,58 @@ public class PolicyRepository {
         return findById(tenantId, id).orElseThrow();
     }
 
+    /**
+     * Count of ACTIVE named insureds. The policy cannot be ISSUED or IN_FORCE
+     * without at least one (second Policy slice, SPEC 11.2.4 policy_insured).
+     */
+    public int countNamedInsured(UUID tenantId, UUID id) {
+        Integer count = jdbc.queryForObject("""
+                SELECT COUNT(*) FROM policy_insured
+                 WHERE tenant_id = ? AND policy_id = ? AND insured_role = 'NAMED_INSURED'
+                   AND status = 'ACTIVE'
+                """, Integer.class, tenantId, id);
+        return count == null ? 0 : count;
+    }
+
+    /**
+     * Bumps the aggregate version without a status change. Used by every
+     * second-slice material change (coverage, endorsement, insured, location) so
+     * the policy ETag still guards all policy commands.
+     */
+    public int touch(UUID tenantId, UUID id, int expectedVersion) {
+        return jdbc.update("""
+                UPDATE policy
+                   SET version = version + 1, updated_at = ?
+                 WHERE tenant_id = ? AND id = ? AND version = ?
+                """, Timestamp.from(Instant.now()), tenantId, id, expectedVersion);
+    }
+
+    public Optional<CommandIdempotencyRecord> findCommandIdempotency(UUID tenantId, String scope,
+                                                                     String key) {
+        return jdbc.query("""
+                        SELECT resource_id, request_hash
+                          FROM policy_command_idempotency
+                         WHERE tenant_id = ? AND scope = ? AND idempotency_key = ?
+                        """,
+                (rs, rowNum) -> new CommandIdempotencyRecord(
+                        rs.getObject("resource_id", UUID.class),
+                        rs.getString("request_hash")),
+                tenantId, scope, key).stream().findFirst();
+    }
+
+    public boolean insertCommandIdempotencyIfAbsent(UUID tenantId, String scope, String key,
+                                                    String requestHash, UUID policyId,
+                                                    UUID resourceId) {
+        int rows = jdbc.update("""
+                INSERT INTO policy_command_idempotency
+                       (tenant_id, scope, idempotency_key, request_hash, policy_id, resource_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (tenant_id, scope, idempotency_key) DO NOTHING
+                """, tenantId, scope, key, requestHash, policyId, resourceId,
+                Timestamp.from(Instant.now()));
+        return rows == 1;
+    }
+
     public Optional<IdempotencyRecord> findIdempotency(UUID tenantId, String key) {
         return jdbc.query("""
                         SELECT policy_id, request_hash

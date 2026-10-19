@@ -17,9 +17,11 @@ public class PolicyService {
     private static final Logger LOG = LoggerFactory.getLogger(PolicyService.class);
 
     private final PolicyRepository repository;
+    private final PolicyVersionService versionService;
 
-    public PolicyService(PolicyRepository repository) {
+    public PolicyService(PolicyRepository repository, PolicyVersionService versionService) {
         this.repository = repository;
+        this.versionService = versionService;
     }
 
     /** Compatibility read: all policies. New callers should use the page form. */
@@ -67,7 +69,7 @@ public class PolicyService {
 
         String idempotencyKey = IdempotencyKeys.normalize(rawIdempotencyKey);
         if (idempotencyKey == null) {
-            return new CreateResult(createPolicy(request, UUID.randomUUID()), false);
+            return new CreateResult(createPolicyWithInitialVersion(request, UUID.randomUUID()), false);
         }
 
         String requestHash = IdempotencyKeys.requestHash(request);
@@ -86,7 +88,7 @@ public class PolicyService {
             return replayOrConflict(raced, requestHash, request.tenantId());
         }
 
-        return new CreateResult(createPolicy(request, policyId), false);
+        return new CreateResult(createPolicyWithInitialVersion(request, policyId), false);
     }
 
     /** Compatibility overload: optimistic concurrency from the body only. */
@@ -98,7 +100,10 @@ public class PolicyService {
      * Applies one lifecycle transition. {@code If-Match} takes precedence over
      * the compatibility {@code expectedVersion} body field. A stale version is a
      * 409 problem carrying {@code currentVersion} and {@code expectedVersion}.
+     * A transition to ISSUED requires a named insured and issues the pending
+     * DRAFT policy version with its canonical snapshot hash.
      */
+    @Transactional
     public Policy updateStatus(UUID tenantId, UUID id, UpdatePolicyStatusRequest request,
                                String ifMatch) {
         Integer headerVersion = EntityTags.parse(ifMatch);
@@ -110,6 +115,10 @@ public class PolicyService {
         }
 
         String targetStatus = PolicyRules.validateTransition(current.status(), request.status());
+        if ("ISSUED".equals(targetStatus)) {
+            PartyRules.requireNamedInsuredBeforeIssue(targetStatus,
+                    repository.countNamedInsured(tenantId, id));
+        }
 
         if (headerVersion == null && request.expectedVersion() != null
                 && request.expectedVersion() != current.version()) {
@@ -125,7 +134,18 @@ public class PolicyService {
             expectedVersion = headerVersion == EntityTags.ANY ? current.version() : headerVersion;
         }
 
-        return repository.updateStatus(tenantId, id, targetStatus, request.reason(), expectedVersion);
+        Policy updated = repository.updateStatus(tenantId, id, targetStatus, request.reason(),
+                expectedVersion);
+        if ("ISSUED".equals(targetStatus)) {
+            versionService.issuePolicyVersion(updated, null);
+        }
+        return updated;
+    }
+
+    private Policy createPolicyWithInitialVersion(CreatePolicyRequest request, UUID policyId) {
+        Policy policy = createPolicy(request, policyId);
+        versionService.createInitialVersion(policy, UUID.randomUUID());
+        return policy;
     }
 
     private Policy createPolicy(CreatePolicyRequest request, UUID policyId) {

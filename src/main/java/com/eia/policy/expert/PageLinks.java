@@ -24,6 +24,18 @@ final class PageLinks {
         return new PolicyPage.Links(self, next, prev);
     }
 
+    static ItemPage.Links buildItem(String basePath, Map<String, String> filters,
+                                    int page, int size, long total) {
+        ItemPage.Link self = new ItemPage.Link(href(basePath, filters, page, size));
+        ItemPage.Link next = (long) (page + 1) * size < total
+                ? new ItemPage.Link(href(basePath, filters, page + 1, size))
+                : null;
+        ItemPage.Link prev = page > 0 && (long) page * size <= total
+                ? new ItemPage.Link(href(basePath, filters, page - 1, size))
+                : null;
+        return new ItemPage.Links(self, next, prev);
+    }
+
     static String href(String basePath, Map<String, String> filters, int page, int size) {
         UriComponentsBuilder builder = UriComponentsBuilder.fromPath(basePath);
         filters.forEach(builder::queryParam);

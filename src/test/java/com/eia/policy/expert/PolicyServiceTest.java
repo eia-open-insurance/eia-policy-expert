@@ -37,6 +37,9 @@ class PolicyServiceTest {
     @Mock
     private PolicyRepository repository;
 
+    @Mock
+    private PolicyVersionService versionService;
+
     @Test
     void storesIdempotencyKeyInTheSameTransactionBeforeCreatingThePolicy() {
         when(repository.findIdempotency(TENANT, "idem-1")).thenReturn(Optional.empty());
@@ -45,7 +48,7 @@ class PolicyServiceTest {
         when(repository.create(any(CreatePolicyRequest.class), any(UUID.class)))
                 .thenReturn(policy("DRAFT", 0));
 
-        CreateResult result = new PolicyService(repository).create(request(), "idem-1");
+        CreateResult result = new PolicyService(repository, versionService).create(request(), "idem-1");
 
         assertThat(result.replayed()).isFalse();
         assertThat(result.policy().status()).isEqualTo("DRAFT");
@@ -63,7 +66,7 @@ class PolicyServiceTest {
                         POLICY_ID, IdempotencyKeys.requestHash(request))));
         when(repository.findById(TENANT, POLICY_ID)).thenReturn(Optional.of(policy("DRAFT", 0)));
 
-        CreateResult result = new PolicyService(repository).create(request, "idem-1");
+        CreateResult result = new PolicyService(repository, versionService).create(request, "idem-1");
 
         assertThat(result.replayed()).isTrue();
         assertThat(result.policy().id()).isEqualTo(POLICY_ID);
@@ -76,7 +79,7 @@ class PolicyServiceTest {
         when(repository.findIdempotency(TENANT, "idem-1"))
                 .thenReturn(Optional.of(new IdempotencyRecord(POLICY_ID, "different-hash")));
 
-        assertThatThrownBy(() -> new PolicyService(repository).create(request, "idem-1"))
+        assertThatThrownBy(() -> new PolicyService(repository, versionService).create(request, "idem-1"))
                 .isInstanceOf(ApiException.class)
                 .satisfies(ex -> {
                     ApiException api = (ApiException) ex;
@@ -99,7 +102,7 @@ class PolicyServiceTest {
                 .thenReturn(false);
         when(repository.findById(TENANT, POLICY_ID)).thenReturn(Optional.of(policy("DRAFT", 0)));
 
-        CreateResult result = new PolicyService(repository).create(request, "idem-1");
+        CreateResult result = new PolicyService(repository, versionService).create(request, "idem-1");
 
         assertThat(result.replayed()).isTrue();
         assertThat(result.policy().id()).isEqualTo(POLICY_ID);
@@ -111,7 +114,7 @@ class PolicyServiceTest {
         when(repository.create(any(CreatePolicyRequest.class), any(UUID.class)))
                 .thenReturn(policy("DRAFT", 0));
 
-        CreateResult result = new PolicyService(repository).create(request(), null);
+        CreateResult result = new PolicyService(repository, versionService).create(request(), null);
 
         assertThat(result.replayed()).isFalse();
         verify(repository).create(any(CreatePolicyRequest.class), any(UUID.class));
@@ -122,7 +125,7 @@ class PolicyServiceTest {
     void rejectsStaleIfMatchBeforeUpdating() {
         when(repository.findById(TENANT, POLICY_ID)).thenReturn(Optional.of(policy("DRAFT", 2)));
 
-        assertThatThrownBy(() -> new PolicyService(repository).updateStatus(
+        assertThatThrownBy(() -> new PolicyService(repository, versionService).updateStatus(
                 TENANT, POLICY_ID, new UpdatePolicyStatusRequest("QUOTED", 0, null), "\"1\""))
                 .isInstanceOf(ApiException.class)
                 .satisfies(ex -> {
@@ -142,11 +145,56 @@ class PolicyServiceTest {
         when(repository.updateStatus(TENANT, POLICY_ID, "QUOTED", null, 2))
                 .thenReturn(policy("QUOTED", 3));
 
-        Policy result = new PolicyService(repository).updateStatus(
+        Policy result = new PolicyService(repository, versionService).updateStatus(
                 TENANT, POLICY_ID, new UpdatePolicyStatusRequest("QUOTED", 0, null), "*");
 
         assertThat(result.status()).isEqualTo("QUOTED");
         verify(repository).updateStatus(TENANT, POLICY_ID, "QUOTED", null, 2);
+    }
+
+    @Test
+    void refusesToIssueWithoutANamedInsured() {
+        when(repository.findById(TENANT, POLICY_ID))
+                .thenReturn(Optional.of(policy("BOUND", 3)));
+        when(repository.countNamedInsured(TENANT, POLICY_ID)).thenReturn(0);
+
+        assertThatThrownBy(() -> new PolicyService(repository, versionService).updateStatus(
+                TENANT, POLICY_ID, new UpdatePolicyStatusRequest("ISSUED", 3, null), "\"3\""))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException api = (ApiException) ex;
+                    assertThat(api.status()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
+                    assertThat(api.code()).isEqualTo("NAMED_INSURED_REQUIRED");
+                });
+
+        verify(repository, never()).updateStatus(any(), any(), any(), any(), anyInt());
+        verify(versionService, never()).issuePolicyVersion(any(), any());
+    }
+
+    @Test
+    void issuingAPolicyIssuesThePendingVersion() {
+        when(repository.findById(TENANT, POLICY_ID))
+                .thenReturn(Optional.of(policy("BOUND", 3)));
+        when(repository.countNamedInsured(TENANT, POLICY_ID)).thenReturn(1);
+        when(repository.updateStatus(TENANT, POLICY_ID, "ISSUED", null, 3))
+                .thenReturn(policy("ISSUED", 4));
+
+        Policy result = new PolicyService(repository, versionService).updateStatus(
+                TENANT, POLICY_ID, new UpdatePolicyStatusRequest("ISSUED", 3, null), "\"3\"");
+
+        assertThat(result.status()).isEqualTo("ISSUED");
+        verify(versionService).issuePolicyVersion(result, null);
+    }
+
+    @Test
+    void creatingAPolicyStoresItsInitialVersion() {
+        when(repository.create(any(CreatePolicyRequest.class), any(UUID.class)))
+                .thenReturn(policy("DRAFT", 0));
+
+        Policy created = new PolicyService(repository, versionService).create(request());
+
+        assertThat(created.status()).isEqualTo("DRAFT");
+        verify(versionService).createInitialVersion(eq(created), any(UUID.class));
     }
 
     private static CreatePolicyRequest request() {
