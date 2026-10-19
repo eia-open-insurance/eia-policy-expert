@@ -1,6 +1,6 @@
 # Security policy
 
-Report vulnerabilities through GitHub private vulnerability reporting on this repository, or email `security@eia-open-insurance.org`.
+Report vulnerabilities through GitHub private vulnerability reporting on this repository, or email `support@rmburgess.com`.
 
 Do not open a public issue for a suspected vulnerability.
 
