@@ -1,0 +1,17 @@
+server:
+  port: 8083
+spring:
+  application:
+    name: eia-policy-expert
+  datasource:
+    url: jdbc:postgresql://localhost:5432/eia_policy
+    username: postgres
+    password: postgres
+  sql:
+    init:
+      mode: always
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info

@@ -13,6 +13,27 @@
 
 Policy persistence, invariants, read models, batch jobs, Quartz schedules, and outbox/inbox. Direct policy lifecycle, coverage, limits, billing, underwriting, rating, and capacity.
 
+## Implemented slice
+
+The first vertical slice persists the `policy` aggregate with `policy_number`, `product_code`, `insured_party_id`, `status`, `effective_date`, `expiration_date`, `premium_amount`, `premium_currency`, `limit_amount`, `limit_currency`, `version`, and audit timestamps. It enforces the policy period, non-negative premium and limit, and the SPEC policy status lifecycle.
+
+## Local development
+
+Requires JDK 22, PostgreSQL 17, and a database named `eia_policy` owned by `postgres`.
+
+```powershell
+$env:JAVA_HOME='C:\Program Files\Eclipse Adoptium\jdk-22.0.2.9-hotspot'
+.\gradlew.bat build
+.\gradlew.bat bootRun
+```
+
+The service listens on port 8083. `schema.sql` creates the table and sequence on startup.
+
+- `GET /internal/v1/policies?tenantId={tenantId}`
+- `GET /internal/v1/policies/{id}?tenantId={tenantId}`
+- `POST /internal/v1/policies`
+- `PATCH /internal/v1/policies/{id}/status?tenantId={tenantId}`
+
 ## Responsibilities
 
 - Keep this repository focused on one deployable component or one platform concern.
