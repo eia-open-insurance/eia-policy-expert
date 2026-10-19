@@ -18,10 +18,10 @@ Policy persistence, invariants, read models, batch jobs, Quartz schedules, and o
 - Keep this repository focused on one deployable component or one platform concern.
 - Follow the repository standard in `../CONVENTIONS.md` and the specification in `../../SPEC.md`.
 - Publish and consume contracts through `eia-contracts`.
-- Maintain README, CODEOWNERS, SECURITY, CHANGELOG, tests, and CI.
+- Maintain README, CODEOWNERS, SECURITY, CHANGELOG, tests, and local verification.
 - Contain no business logic in shared libraries or front-end remotes.
 
-## Required checks
+## Verification
 
 - Lint and format
 - Unit tests with 100% business-logic coverage where applicable
