@@ -1,5 +1,6 @@
 package com.eia.policy.expert;
 
+import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
@@ -9,6 +10,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -45,11 +47,31 @@ public class PolicyRepository {
         this.jdbc = jdbc;
     }
 
+    /**
+     * Compatibility read: all policies in the stable order used by pagination.
+     * New callers should use {@link #findPage(UUID, int, int)}.
+     */
     public List<Policy> findAll(UUID tenantId) {
         return jdbc.query(SELECT_COLUMNS + """
                  WHERE tenant_id = ?
-                 ORDER BY created_at DESC, policy_number
+                 ORDER BY updated_at DESC, id ASC
                 """, MAPPER, tenantId);
+    }
+
+    /**
+     * Stable page ordering: {@code updated_at DESC, id ASC}. The id tie-breaker
+     * keeps the order deterministic when two rows share a timestamp.
+     */
+    public PolicyPageData findPage(UUID tenantId, int page, int size) {
+        long offset = (long) page * size;
+        List<Policy> items = jdbc.query(SELECT_COLUMNS + """
+                 WHERE tenant_id = ?
+                 ORDER BY updated_at DESC, id ASC
+                 LIMIT ? OFFSET ?
+                """, MAPPER, tenantId, size, offset);
+        Long total = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM policy WHERE tenant_id = ?", Long.class, tenantId);
+        return new PolicyPageData(items, total == null ? 0L : total);
     }
 
     public Optional<Policy> findById(UUID tenantId, UUID id) {
@@ -58,23 +80,29 @@ public class PolicyRepository {
                 """, MAPPER, tenantId, id).stream().findFirst();
     }
 
+    /** Compatibility create: generates the policy id in the repository. */
     public Policy create(CreatePolicyRequest request) {
+        return create(request, UUID.randomUUID());
+    }
+
+    public Policy create(CreatePolicyRequest request, UUID policyId) {
         String status = PolicyRules.normalizeInitialStatus(request.status());
         String policyNumber = request.policyNumber() == null || request.policyNumber().isBlank()
                 ? nextPolicyNumber()
                 : request.policyNumber().trim();
-        UUID id = UUID.randomUUID();
         Instant now = Instant.now();
         jdbc.update("""
                 INSERT INTO policy (id, tenant_id, policy_number, product_code, insured_party_id, status,
                                     effective_date, expiration_date, premium_amount, premium_currency,
                                     limit_amount, limit_currency, version, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
-                """, id, request.tenantId(), policyNumber, request.productCode().trim(),
+                """, policyId, request.tenantId(), policyNumber, request.productCode().trim(),
                 request.insuredPartyId(), status, request.effectiveDate(), request.expirationDate(),
                 request.premiumAmount(), request.premiumCurrency(), request.limitAmount(),
                 request.limitCurrency(), Timestamp.from(now), Timestamp.from(now));
-        return findById(request.tenantId(), id).orElseThrow();
+        return findById(request.tenantId(), policyId).orElseThrow(() -> new ApiException(
+                HttpStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR",
+                "Created policy could not be reloaded."));
     }
 
     public Policy updateStatus(UUID tenantId, UUID id, String status, String reason, int expectedVersion) {
@@ -85,15 +113,45 @@ public class PolicyRepository {
                  WHERE tenant_id = ? AND id = ? AND version = ?
                 """, status, blankToNull(reason), Timestamp.from(now), tenantId, id, expectedVersion);
         if (rows == 0) {
-            boolean exists = findById(tenantId, id).isPresent();
-            if (!exists) {
-                throw new ApiException(org.springframework.http.HttpStatus.NOT_FOUND,
-                        "POLICY_NOT_FOUND", "Policy not found: " + id);
-            }
-            throw new ApiException(org.springframework.http.HttpStatus.CONFLICT,
-                    "CONCURRENT_MODIFICATION", "Policy was modified by another request; reload and retry");
+            Policy current = findById(tenantId, id).orElseThrow(() -> new ApiException(
+                    HttpStatus.NOT_FOUND, "POLICY_NOT_FOUND", "Policy not found: " + id));
+            String message = "Expected version " + expectedVersion
+                    + " but policy is at version " + current.version() + "; reload and retry";
+            throw new ApiException(HttpStatus.CONFLICT, "CONCURRENT_MODIFICATION", message,
+                    List.of(new ApiException.FieldIssue(
+                            "expectedVersion", "STALE_VERSION", message)),
+                    Map.of("currentVersion", current.version(), "expectedVersion", expectedVersion));
         }
         return findById(tenantId, id).orElseThrow();
+    }
+
+    public Optional<IdempotencyRecord> findIdempotency(UUID tenantId, String key) {
+        return jdbc.query("""
+                        SELECT policy_id, request_hash
+                          FROM policy_idempotency
+                         WHERE tenant_id = ? AND idempotency_key = ?
+                        """,
+                (rs, rowNum) -> new IdempotencyRecord(
+                        rs.getObject("policy_id", UUID.class),
+                        rs.getString("request_hash")),
+                tenantId, key).stream().findFirst();
+    }
+
+    /**
+     * Reserves the idempotency key with a single PostgreSQL statement. The
+     * unique constraint {@code (tenant_id, idempotency_key)} decides the winner;
+     * {@code ON CONFLICT DO NOTHING} returns zero instead of aborting the
+     * transaction, so a concurrent duplicate can be read back safely.
+     */
+    public boolean insertIdempotencyIfAbsent(UUID tenantId, String key, String requestHash,
+                                             UUID policyId) {
+        int rows = jdbc.update("""
+                INSERT INTO policy_idempotency
+                       (tenant_id, idempotency_key, request_hash, policy_id, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
+                """, tenantId, key, requestHash, policyId, Timestamp.from(Instant.now()));
+        return rows == 1;
     }
 
     private String nextPolicyNumber() {

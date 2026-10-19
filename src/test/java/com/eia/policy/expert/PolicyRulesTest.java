@@ -29,7 +29,9 @@ class PolicyRulesTest {
                     ApiException api = (ApiException) ex;
                     assertThat(api.status()).isEqualTo(HttpStatus.BAD_REQUEST);
                     assertThat(api.code()).isEqualTo("VALIDATION_ERROR");
-                    assertThat(api.details()).anyMatch(issue -> issue.field().equals("expirationDate"));
+                    assertThat(api.details()).anyMatch(issue ->
+                            issue.field().equals("expirationDate")
+                                    && issue.code().equals("INVALID_DATE_RANGE"));
                 });
     }
 
@@ -73,10 +75,17 @@ class PolicyRulesTest {
     }
 
     @Test
-    void rejectsSkippedAndTerminalTransitions() {
+    void rejectsSkippedAndTerminalTransitionsAsConflict() {
         assertThatThrownBy(() -> PolicyRules.validateTransition("DRAFT", "ISSUED"))
                 .isInstanceOf(ApiException.class)
-                .satisfies(ex -> assertThat(((ApiException) ex).code()).isEqualTo("INVALID_STATUS_TRANSITION"));
+                .satisfies(ex -> {
+                    ApiException api = (ApiException) ex;
+                    assertThat(api.status()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(api.code()).isEqualTo("INVALID_STATUS_TRANSITION");
+                    assertThat(api.details()).anyMatch(issue ->
+                            issue.field().equals("status")
+                                    && issue.code().equals("INVALID_STATUS_TRANSITION"));
+                });
         assertThatThrownBy(() -> PolicyRules.validateTransition("VOID", "IN_FORCE"))
                 .isInstanceOf(ApiException.class);
         assertThatThrownBy(() -> PolicyRules.validateTransition("DRAFT", "DRAFT"))

@@ -28,3 +28,19 @@ CREATE TABLE IF NOT EXISTS policy (
 );
 
 CREATE INDEX IF NOT EXISTS idx_policy_tenant_status ON policy (tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_policy_tenant_updated ON policy (tenant_id, updated_at DESC, id);
+
+-- Idempotency scope for POST /internal/v1/policies: tenant + key. The unique
+-- constraint is the concurrency arbiter for duplicate creates. The row is
+-- written in the same transaction as the policy, so a failed create leaves no
+-- reservation behind.
+CREATE TABLE IF NOT EXISTS policy_idempotency (
+    tenant_id UUID NOT NULL,
+    idempotency_key VARCHAR(255) NOT NULL,
+    request_hash CHAR(64) NOT NULL,
+    policy_id UUID NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    CONSTRAINT uq_policy_idempotency_key UNIQUE (tenant_id, idempotency_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_policy_idempotency_policy ON policy_idempotency (policy_id);

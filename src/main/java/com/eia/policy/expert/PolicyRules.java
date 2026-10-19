@@ -46,24 +46,30 @@ public final class PolicyRules {
     ) {
         List<ApiException.FieldIssue> issues = new ArrayList<>();
         if (effectiveDate == null) {
-            issues.add(new ApiException.FieldIssue("effectiveDate", "effectiveDate is required"));
+            issues.add(new ApiException.FieldIssue("effectiveDate", "REQUIRED",
+                    "effectiveDate is required"));
         }
         if (expirationDate == null) {
-            issues.add(new ApiException.FieldIssue("expirationDate", "expirationDate is required"));
+            issues.add(new ApiException.FieldIssue("expirationDate", "REQUIRED",
+                    "expirationDate is required"));
         }
         if (effectiveDate != null && expirationDate != null && effectiveDate.isAfter(expirationDate)) {
-            issues.add(new ApiException.FieldIssue("expirationDate",
+            issues.add(new ApiException.FieldIssue("expirationDate", "INVALID_DATE_RANGE",
                     "expirationDate must be on or after effectiveDate"));
         }
         if (premiumAmount == null) {
-            issues.add(new ApiException.FieldIssue("premiumAmount", "premiumAmount is required"));
+            issues.add(new ApiException.FieldIssue("premiumAmount", "REQUIRED",
+                    "premiumAmount is required"));
         } else if (premiumAmount.signum() < 0) {
-            issues.add(new ApiException.FieldIssue("premiumAmount", "premiumAmount must be non-negative"));
+            issues.add(new ApiException.FieldIssue("premiumAmount", "MIN_VALUE",
+                    "premiumAmount must be non-negative"));
         }
         if (limitAmount == null) {
-            issues.add(new ApiException.FieldIssue("limitAmount", "limitAmount is required"));
+            issues.add(new ApiException.FieldIssue("limitAmount", "REQUIRED",
+                    "limitAmount is required"));
         } else if (limitAmount.signum() < 0) {
-            issues.add(new ApiException.FieldIssue("limitAmount", "limitAmount must be non-negative"));
+            issues.add(new ApiException.FieldIssue("limitAmount", "MIN_VALUE",
+                    "limitAmount must be non-negative"));
         }
         if (!issues.isEmpty()) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "Policy validation failed", issues);
@@ -77,20 +83,24 @@ public final class PolicyRules {
         }
         String status = normalizeStatus(rawStatus);
         if (!"DRAFT".equals(status)) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_INITIAL_STATUS",
-                    "A policy must be created as DRAFT and advanced through the lifecycle");
+            String message = "A policy must be created as DRAFT and advanced through the lifecycle";
+            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_INITIAL_STATUS", message,
+                    List.of(new ApiException.FieldIssue("status", "INVALID_INITIAL_STATUS", message)));
         }
         return status;
     }
 
     public static String normalizeStatus(String rawStatus) {
         if (rawStatus == null || rawStatus.isBlank()) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_STATUS", "status is required");
+            String message = "status is required";
+            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_STATUS", message,
+                    List.of(new ApiException.FieldIssue("status", "INVALID_STATUS", message)));
         }
         String status = rawStatus.trim().toUpperCase(Locale.ROOT);
         if (!STATUSES.contains(status)) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_STATUS",
-                    "Unknown policy status: " + rawStatus);
+            String message = "Unknown policy status: " + rawStatus;
+            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_STATUS", message,
+                    List.of(new ApiException.FieldIssue("status", "INVALID_STATUS", message)));
         }
         return status;
     }
@@ -99,13 +109,17 @@ public final class PolicyRules {
         String from = normalizeStatus(fromStatus);
         String to = normalizeStatus(toStatus);
         if (from.equals(to)) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_STATUS_TRANSITION",
-                    "Policy is already in status " + from);
+            throw invalidTransition("Policy is already in status " + from);
         }
         if (!TRANSITIONS.getOrDefault(from, Set.of()).contains(to)) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_STATUS_TRANSITION",
-                    "Cannot transition policy from " + from + " to " + to);
+            throw invalidTransition("Cannot transition policy from " + from + " to " + to);
         }
         return to;
+    }
+
+    private static ApiException invalidTransition(String message) {
+        return new ApiException(HttpStatus.CONFLICT, "INVALID_STATUS_TRANSITION", message,
+                List.of(new ApiException.FieldIssue(
+                        "status", "INVALID_STATUS_TRANSITION", message)));
     }
 }
