@@ -11,7 +11,7 @@
 
 ## Purpose
 
-Policy persistence, invariants, read models, batch jobs, Quartz schedules, and outbox/inbox. Primary policy lifecycle, coverage, limits, billing, underwriting, rating, and capacity.
+Policy persistence, invariants, read models, batch jobs, Quartz schedules, and outbox/inbox. Direct policy lifecycle, coverage, limits, billing, underwriting, rating, and capacity.
 
 ## Responsibilities
 
