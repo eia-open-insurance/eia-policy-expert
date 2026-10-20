@@ -44,8 +44,8 @@ contract structures from SPEC 11.2:
   on the last row, and PAID/WAIVED settlement.
 - `outbox_event`: canonical Policy events written in the same transaction as
   each covered mutation (`created`, `updated`, `version-issued`, `endorsed`,
-  `cancelled`, `reinstated`, `billing-plan-created`, `installment-paid`,
-  `installment-waived`), with conditional Quartz HTTP dispatch.
+  `cancelled`, `reinstated`, `billing-plan.created`, `installment.paid`,
+  `installment.waived`), with conditional Quartz HTTP dispatch.
 
 Every second-slice mutation accepts an optional `If-Match` strong entity tag
 (the aggregate `version`), returns the new `ETag`, and accepts an optional

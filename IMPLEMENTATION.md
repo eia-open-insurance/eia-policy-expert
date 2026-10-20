@@ -48,8 +48,8 @@ aggregate change and the event row:
 | `POST /internal/v1/policies/{id}/endorsements` | `policy.policy.endorsed` + `policy.policy.version-issued` |
 | `POST /internal/v1/policies/{id}/cancel` | `policy.policy.cancelled` + `policy.policy.version-issued` |
 | `POST /internal/v1/policies/{id}/reinstate` | `policy.policy.reinstated` + `policy.policy.version-issued` |
-| `POST /api/v1/policies/{id}/billing` | `policy.billing-plan-created` |
-| `PATCH /api/v1/policies/{id}/billing/installments/{installmentId}` | `policy.installment-paid` or `policy.installment-waived`; same-status replay writes nothing |
+| `POST /api/v1/policies/{id}/billing` | `policy.billing-plan.created` |
+| `PATCH /api/v1/policies/{id}/billing/installments/{installmentId}` | `policy.installment.paid` or `policy.installment.waived`; same-status replay writes nothing |
 
 Payloads carry `policyId`, `policyNumber`, `status`, `version`, the policy
 effective/expiration dates, premium and limit amounts as scale-4 decimal
@@ -72,18 +72,14 @@ emitted as specified; the catalog needs either these two additions or an agreed
 mapping to the existing lifecycle names. This is a contract mismatch owned by
 `eia-contracts`, not by this repository.
 
-The requested billing names (`policy.billing-plan-created`,
-`policy.installment-paid`, `policy.installment-waived`) have two dot-segments,
-while the platform `EventEnvelope` validator requires
-`{vertical}.{aggregate}.{verb}`. The outbox rows persist the exact requested
-names (so consumers and tests see them), but the canonical envelope is built
-from three-segment aliases (`policy.billing-plan.created`,
-`policy.installment.paid`, `policy.installment.waived`). Because
-`OutboxEvent.toEnvelope()` revalidates the stored `event_type`, dispatching one
-of these rows through the platform HTTP dispatcher fails. The platform
-validator or the event names must be aligned before enabling dispatch for
-billing events; this is reported to `eia-platform`/`eia-contracts` rather than
-worked around here.
+The billing events (`policy.billing-plan.created`, `policy.installment.paid`,
+`policy.installment.waived`) use the canonical three-segment envelope form, so
+`OutboxEvent.fromEnvelope` and the platform dispatcher accept them unchanged.
+They are not yet listed in `eia-contracts/asyncapi/policy.yaml`; the catalog
+needs these additive entries. Billing payloads carry `policyId`,
+`policyNumber`, `planId`, `planNumber`, and either the full installment schedule
+(plan creation) or the settled installment facts (`installmentId`, `number`,
+`amount`, `currency`, `status`, `paymentId`).
 
 `policy.policy.version-issued` is emitted by the issue, endorsement,
 cancellation, and reinstatement commands. Coverage/insured/location changes can

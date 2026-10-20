@@ -1,5 +1,6 @@
 package com.eia.policy.expert;
 
+import com.eia.platform.libs.events.EventEnvelope;
 import com.eia.platform.libs.outbox.OutboxEvent;
 import com.eia.platform.libs.outbox.OutboxRepository;
 import org.springframework.dao.DuplicateKeyException;
@@ -18,9 +19,9 @@ import java.util.UUID;
  * Billing plan and installment slice (SPEC 11.2.13).
  *
  * <p>Creating a plan splits the policy premium across 1..24 installments and
- * writes the plan, the schedule, and {@code policy.billing-plan-created} in one
+ * writes the plan, the schedule, and {@code policy.billing-plan.created} in one
  * transaction. Settling an installment writes the row change and
- * {@code policy.installment-paid} / {@code policy.installment-waived} in one
+ * {@code policy.installment.paid} / {@code policy.installment.waived} in one
  * transaction. Every mutation also bumps the policy aggregate version, both to
  * guard concurrent billing commands and to give every outbox event a distinct
  * {@code aggregateVersion} (the outbox unique key).</p>
@@ -84,7 +85,8 @@ public class BillingService {
         }
 
         Policy touched = touch(policy);
-        outbox.insert(PolicyEvents.billingPlanCreated(touched, plan, installments, now));
+        outbox.insert(OutboxEvent.fromEnvelope(
+                PolicyEvents.billingPlanCreated(touched, plan, installments, now)));
         return new BillingPlanView(plan, List.copyOf(installments));
     }
 
@@ -140,10 +142,10 @@ public class BillingService {
         PolicyInstallment updated = billingRepository
                 .findInstallment(tenantId, policyId, installmentId)
                 .orElseThrow(() -> installmentNotFound(installmentId));
-        OutboxEvent event = BillingRules.PAID.equals(target)
+        EventEnvelope event = BillingRules.PAID.equals(target)
                 ? PolicyEvents.installmentPaid(touched, plan, updated, now)
                 : PolicyEvents.installmentWaived(touched, plan, updated, now);
-        outbox.insert(event);
+        outbox.insert(OutboxEvent.fromEnvelope(event));
         return updated;
     }
 

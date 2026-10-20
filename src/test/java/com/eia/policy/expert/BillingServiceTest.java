@@ -1,5 +1,9 @@
 package com.eia.policy.expert;
 
+import com.eia.platform.libs.events.Book;
+import com.eia.platform.libs.events.EventEnvelope;
+import com.eia.platform.libs.outbox.OutboxEvent;
+import com.eia.platform.libs.outbox.OutboxRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -43,6 +47,9 @@ class BillingServiceTest {
 
     @Autowired
     private JdbcTemplate jdbc;
+
+    @Autowired
+    private OutboxRepository outboxRepository;
 
     @Autowired
     private PlatformTransactionManager transactionManager;
@@ -152,7 +159,7 @@ class BillingServiceTest {
         assertThat(paid.paymentId()).isEqualTo(PAYMENT);
         assertThat(paid.amount()).isEqualByComparingTo("40000.0000");
 
-        Map<String, Object> event = event("policy.installment-paid", policy.id());
+        Map<String, Object> event = event("policy.installment.paid", policy.id());
         assertThat(event.get("aggregate_type")).isEqualTo("Policy");
         assertThat(event.get("aggregate_version")).isEqualTo(3L);
         assertThat(event.get("status")).isEqualTo("PENDING");
@@ -185,7 +192,7 @@ class BillingServiceTest {
         assertThat(waived.paidAt()).isNull();
         assertThat(waived.paymentId()).isNull();
 
-        String payload = (String) event("policy.installment-waived", policy.id()).get("payload");
+        String payload = (String) event("policy.installment.waived", policy.id()).get("payload");
         assertThat(payload)
                 .contains("\"installmentId\":\"" + first.id() + "\"")
                 .contains("\"status\":\"WAIVED\"")
@@ -202,14 +209,14 @@ class BillingServiceTest {
         PolicyInstallment paid = billingService.updateInstallment(TENANT, policy.id(), first.id(),
                 new UpdateInstallmentRequest("PAID", PAYMENT));
         int versionAfterPayment = policyService.get(TENANT, policy.id()).version();
-        int paidEvents = countEvents("policy.installment-paid");
+        int paidEvents = countEvents("policy.installment.paid");
 
         PolicyInstallment replay = billingService.updateInstallment(TENANT, policy.id(), first.id(),
                 new UpdateInstallmentRequest("PAID", UUID.randomUUID()));
 
         assertThat(replay).isEqualTo(paid);
         assertThat(policyService.get(TENANT, policy.id()).version()).isEqualTo(versionAfterPayment);
-        assertThat(countEvents("policy.installment-paid")).isEqualTo(paidEvents);
+        assertThat(countEvents("policy.installment.paid")).isEqualTo(paidEvents);
         assertThat(policyService.get(TENANT, policy.id()).version()).isEqualTo(versionAfterPayment);
     }
 
@@ -287,7 +294,7 @@ class BillingServiceTest {
 
         assertThat(count("policy_billing_plan")).isZero();
         assertThat(count("policy_installment")).isZero();
-        assertThat(countEvents("policy.billing-plan-created")).isZero();
+        assertThat(countEvents("policy.billing-plan.created")).isZero();
         assertThat(policyService.get(TENANT, policy.id()).version()).isEqualTo(versionBefore);
     }
 
@@ -311,7 +318,7 @@ class BillingServiceTest {
         assertThat(stored.status()).isEqualTo("DUE");
         assertThat(stored.paidAt()).isNull();
         assertThat(stored.paymentId()).isNull();
-        assertThat(countEvents("policy.installment-paid")).isZero();
+        assertThat(countEvents("policy.installment.paid")).isZero();
         assertThat(policyService.get(TENANT, policy.id()).version()).isEqualTo(versionBefore);
     }
 
@@ -321,7 +328,7 @@ class BillingServiceTest {
         BillingPlanView view = billingService.create(TENANT, policy.id(),
                 new CreateBillingPlanRequest(3, "MONTHLY", FIRST_DUE));
         String planPayload =
-                (String) event("policy.billing-plan-created", policy.id()).get("payload");
+                (String) event("policy.billing-plan.created", policy.id()).get("payload");
         assertThat(planPayload)
                 .contains("\"policyId\":\"" + policy.id() + "\"")
                 .contains("\"policyNumber\":\"POL-BILL-0013\"")
@@ -341,12 +348,48 @@ class BillingServiceTest {
         List<Map<String, Object>> events = jdbc.queryForList("""
                 SELECT aggregate_version, payload
                   FROM outbox_event
-                 WHERE aggregate_id = ? AND event_type = 'policy.installment-paid'
+                 WHERE aggregate_id = ? AND event_type = 'policy.installment.paid'
                  ORDER BY event_sequence
                 """, policy.id());
         assertThat(events).hasSize(2);
         assertThat(events).extracting(row -> row.get("aggregate_version"))
                 .containsExactly(3L, 4L);
+    }
+
+    @Test
+    void canonicalBillingEventsReconstructIntoDispatchableEnvelopes() {
+        Policy policy = createPolicy("POL-BILL-0014", new BigDecimal("120000.00"));
+        BillingPlanView view = billingService.create(TENANT, policy.id(),
+                new CreateBillingPlanRequest(2, "ANNUAL", FIRST_DUE));
+        billingService.updateInstallment(TENANT, policy.id(),
+                view.installments().get(0).id(), new UpdateInstallmentRequest("PAID", PAYMENT));
+        billingService.updateInstallment(TENANT, policy.id(),
+                view.installments().get(1).id(), new UpdateInstallmentRequest("WAIVED", null));
+
+        List<Map<String, Object>> rows = jdbc.queryForList("""
+                SELECT id, event_type
+                  FROM outbox_event
+                 WHERE aggregate_id = ?
+                   AND event_type IN ('policy.billing-plan.created',
+                                      'policy.installment.paid',
+                                      'policy.installment.waived')
+                 ORDER BY event_sequence
+                """, policy.id());
+
+        assertThat(rows).extracting(row -> row.get("event_type")).containsExactly(
+                "policy.billing-plan.created",
+                "policy.installment.paid",
+                "policy.installment.waived");
+        for (Map<String, Object> row : rows) {
+            OutboxEvent stored = outboxRepository
+                    .findById((UUID) row.get("id"))
+                    .orElseThrow();
+            EventEnvelope envelope = stored.toEnvelope();
+            assertThat(envelope.eventType()).isEqualTo(row.get("event_type"));
+            assertThat(envelope.book()).isEqualTo(Book.DIRECT);
+            assertThat(envelope.aggregateId()).isEqualTo(policy.id());
+            assertThat(envelope.aggregateVersion()).isGreaterThanOrEqualTo(1L);
+        }
     }
 
     private Policy createPolicy(String number, BigDecimal premium) {

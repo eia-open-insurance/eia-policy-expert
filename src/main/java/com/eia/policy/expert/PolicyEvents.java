@@ -6,7 +6,6 @@ import com.eia.platform.libs.events.EventEnvelope;
 import com.eia.platform.libs.events.EventIds;
 import com.eia.platform.libs.events.EventMetadata;
 import com.eia.platform.libs.events.EventSubject;
-import com.eia.platform.libs.outbox.OutboxEvent;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -41,9 +40,9 @@ final class PolicyEvents {
     static final String ENDORSED = "policy.policy.endorsed";
     static final String CANCELLED = "policy.policy.cancelled";
     static final String REINSTATED = "policy.policy.reinstated";
-    static final String BILLING_PLAN_CREATED = "policy.billing-plan-created";
-    static final String INSTALLMENT_PAID = "policy.installment-paid";
-    static final String INSTALLMENT_WAIVED = "policy.installment-waived";
+    static final String BILLING_PLAN_CREATED = "policy.billing-plan.created";
+    static final String INSTALLMENT_PAID = "policy.installment.paid";
+    static final String INSTALLMENT_WAIVED = "policy.installment.waived";
 
     private static final Book EVENT_BOOK = Book.DIRECT;
     private static final String VERTICAL = "policy";
@@ -58,15 +57,9 @@ final class PolicyEvents {
      * A billing plan and its full installment schedule are created together, so
      * the event always carries the complete schedule a consumer needs to open
      * receivables.
-     *
-     * <p>The requested event names are two-segment ({@code policy.billing-plan-created}),
-     * while the canonical envelope validator requires
-     * {@code vertical.aggregate.verb}. The row is therefore built from a valid
-     * envelope alias and the requested name is persisted in
-     * {@code event_type} (see IMPLEMENTATION.md).</p>
      */
-    static OutboxEvent billingPlanCreated(Policy policy, PolicyBillingPlan plan,
-                                          List<PolicyInstallment> installments, Instant now) {
+    static EventEnvelope billingPlanCreated(Policy policy, PolicyBillingPlan plan,
+                                            List<PolicyInstallment> installments, Instant now) {
         Objects.requireNonNull(plan, "plan");
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("policyId", policy.id());
@@ -82,22 +75,22 @@ final class PolicyEvents {
         data.put("installments", installments == null
                 ? List.of()
                 : installments.stream().map(PolicyEvents::installmentData).toList());
-        return outbox(policy, BILLING_PLAN_CREATED, data, now);
+        return envelope(policy, BILLING_PLAN_CREATED, data, now);
     }
 
-    static OutboxEvent installmentPaid(Policy policy, PolicyBillingPlan plan,
-                                       PolicyInstallment installment, Instant now) {
+    static EventEnvelope installmentPaid(Policy policy, PolicyBillingPlan plan,
+                                         PolicyInstallment installment, Instant now) {
         return installmentSettled(policy, plan, installment, INSTALLMENT_PAID, now);
     }
 
-    static OutboxEvent installmentWaived(Policy policy, PolicyBillingPlan plan,
-                                         PolicyInstallment installment, Instant now) {
+    static EventEnvelope installmentWaived(Policy policy, PolicyBillingPlan plan,
+                                           PolicyInstallment installment, Instant now) {
         return installmentSettled(policy, plan, installment, INSTALLMENT_WAIVED, now);
     }
 
-    private static OutboxEvent installmentSettled(Policy policy, PolicyBillingPlan plan,
-                                                  PolicyInstallment installment, String eventType,
-                                                  Instant now) {
+    private static EventEnvelope installmentSettled(Policy policy, PolicyBillingPlan plan,
+                                                    PolicyInstallment installment, String eventType,
+                                                    Instant now) {
         Objects.requireNonNull(plan, "plan");
         Objects.requireNonNull(installment, "installment");
         Map<String, Object> data = new LinkedHashMap<>();
@@ -113,35 +106,7 @@ final class PolicyEvents {
         data.put("status", installment.status());
         data.put("paidAt", instant(installment.paidAt()));
         data.put("paymentId", installment.paymentId());
-        return outbox(policy, eventType, data, now);
-    }
-
-    /**
-     * Builds the outbox row for a billing event. The canonical envelope is
-     * created with a three-segment alias so the platform validator accepts it;
-     * the exact requested event name is stored in {@code event_type}.
-     */
-    private static OutboxEvent outbox(Policy policy, String eventType,
-                                      Map<String, Object> data, Instant now) {
-        EventEnvelope envelope = envelope(policy, envelopeAlias(eventType), data, now);
-        OutboxEvent row = OutboxEvent.fromEnvelope(envelope);
-        long aggregateVersion = policy.version() + 1L;
-        UUID eventId = EventIds.deterministic(policy.tenantId(), AGGREGATE_TYPE, policy.id(),
-                aggregateVersion, eventType);
-        return new OutboxEvent(eventId, row.sequence(), row.tenantId(), row.aggregateType(),
-                row.aggregateId(), row.aggregateVersion(), eventType, row.eventVersion(),
-                row.payload(), row.headers(), row.partitionKey(), row.occurredAt(),
-                row.recordedAt(), row.nextAttemptAt(), row.status(), row.attempts(),
-                row.lastError(), row.createdAt(), row.sentAt());
-    }
-
-    private static String envelopeAlias(String eventType) {
-        return switch (eventType) {
-            case BILLING_PLAN_CREATED -> "policy.billing-plan.created";
-            case INSTALLMENT_PAID -> "policy.installment.paid";
-            case INSTALLMENT_WAIVED -> "policy.installment.waived";
-            default -> eventType;
-        };
+        return envelope(policy, eventType, data, now);
     }
 
     private static Map<String, Object> installmentData(PolicyInstallment installment) {

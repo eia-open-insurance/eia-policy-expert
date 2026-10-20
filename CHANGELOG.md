@@ -42,8 +42,8 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   sum guaranteed to equal the policy premium.
 - PAID/WAIVED settlement with payment evidence, same-status idempotent no-op,
   and `409` when switching between terminal statuses.
-- Billing outbox events `policy.billing-plan-created`,
-  `policy.installment-paid`, and `policy.installment-waived` written in the
+- Billing outbox events `policy.billing-plan.created`,
+  `policy.installment.paid`, and `policy.installment.waived` written in the
   same transaction as the plan/installment change.
 - `LivePostgresSmokeTest` opt-in live PostgreSQL flow through issue, coverage,
   endorsement, erosion, cancellation, and reinstatement.
