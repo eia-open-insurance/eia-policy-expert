@@ -33,6 +33,18 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
 - `policy_cancellation` with pro-rata/flat/short-rate return premium and
   `policy_reinstatement` gated by approval and premium evidence.
 - Generic `policy_command_idempotency` for all second-slice mutations.
+- Billing slice: `policy_billing_plan` with one ACTIVE plan per policy
+  (`uq_policy_billing_plan_active`), `policy_installment` with unique
+  `(plan_id, installment_number)`, and tenant-scoped GET/POST/PATCH endpoints
+  under `/api/v1/policies/{policyId}/billing` (plus the `/internal/v1` alias).
+- Equal premium split across 1..24 MONTHLY/QUARTERLY/SEMI_ANNUAL/ANNUAL
+  installments, with the rounding remainder on the last installment and the
+  sum guaranteed to equal the policy premium.
+- PAID/WAIVED settlement with payment evidence, same-status idempotent no-op,
+  and `409` when switching between terminal statuses.
+- Billing outbox events `policy.billing-plan-created`,
+  `policy.installment-paid`, and `policy.installment-waived` written in the
+  same transaction as the plan/installment change.
 - `LivePostgresSmokeTest` opt-in live PostgreSQL flow through issue, coverage,
   endorsement, erosion, cancellation, and reinstatement.
 

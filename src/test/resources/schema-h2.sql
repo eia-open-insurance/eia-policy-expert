@@ -338,6 +338,54 @@ CREATE TABLE IF NOT EXISTS policy_reinstatement (
 CREATE INDEX IF NOT EXISTS idx_policy_reinstatement_policy
     ON policy_reinstatement (tenant_id, policy_id, created_at DESC);
 
+-- H2-compatible copy of the billing tables. H2 has no partial unique index, so
+-- the "one ACTIVE plan per policy" rule is enforced by BillingService for this
+-- dialect; production enforces it with uq_policy_billing_plan_active.
+CREATE TABLE IF NOT EXISTS policy_billing_plan (
+    id UUID PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    policy_id UUID NOT NULL REFERENCES policy (id) ON DELETE CASCADE,
+    plan_number VARCHAR(32) NOT NULL,
+    total_premium NUMERIC(19,4) NOT NULL,
+    currency CHAR(3) NOT NULL,
+    installment_count INTEGER NOT NULL,
+    frequency VARCHAR(16) NOT NULL,
+    first_due_date DATE NOT NULL,
+    status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    CONSTRAINT uq_policy_billing_plan_number UNIQUE (policy_id, plan_number),
+    CONSTRAINT ck_policy_billing_plan_premium CHECK (total_premium >= 0),
+    CONSTRAINT ck_policy_billing_plan_count CHECK (installment_count BETWEEN 1 AND 24),
+    CONSTRAINT ck_policy_billing_plan_frequency
+        CHECK (frequency IN ('MONTHLY', 'QUARTERLY', 'SEMI_ANNUAL', 'ANNUAL')),
+    CONSTRAINT ck_policy_billing_plan_status
+        CHECK (status IN ('ACTIVE', 'COMPLETE', 'CANCELLED'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_policy_billing_plan_policy
+    ON policy_billing_plan (tenant_id, policy_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS policy_installment (
+    id UUID PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    plan_id UUID NOT NULL REFERENCES policy_billing_plan (id) ON DELETE CASCADE,
+    installment_number INTEGER NOT NULL,
+    due_date DATE NOT NULL,
+    amount NUMERIC(19,4) NOT NULL,
+    status VARCHAR(16) NOT NULL DEFAULT 'DUE',
+    paid_at TIMESTAMP WITH TIME ZONE,
+    payment_id UUID,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    CONSTRAINT uq_policy_installment_number UNIQUE (plan_id, installment_number),
+    CONSTRAINT ck_policy_installment_number CHECK (installment_number >= 1),
+    CONSTRAINT ck_policy_installment_amount CHECK (amount >= 0),
+    CONSTRAINT ck_policy_installment_status
+        CHECK (status IN ('DUE', 'PAID', 'OVERDUE', 'WAIVED'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_policy_installment_plan
+    ON policy_installment (tenant_id, plan_id, installment_number);
+
 -- H2-compatible copy of the PostgreSQL outbox table. JSON payloads are TEXT
 -- here; production DDL uses jsonb.
 CREATE TABLE IF NOT EXISTS outbox_event (

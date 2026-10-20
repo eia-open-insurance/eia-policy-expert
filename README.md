@@ -39,9 +39,13 @@ contract structures from SPEC 11.2:
 - `policy_cancellation` and `policy_reinstatement`: notice, reason, effective
   date, pro-rata return premium, and a reinstatement gate that requires an
   approval and documented premium evidence.
+- `policy_billing_plan` and `policy_installment`: one ACTIVE plan per policy,
+  an equal premium split across 1..24 installments with the rounding remainder
+  on the last row, and PAID/WAIVED settlement.
 - `outbox_event`: canonical Policy events written in the same transaction as
   each covered mutation (`created`, `updated`, `version-issued`, `endorsed`,
-  `cancelled`, `reinstated`), with conditional Quartz HTTP dispatch.
+  `cancelled`, `reinstated`, `billing-plan-created`, `installment-paid`,
+  `installment-waived`), with conditional Quartz HTTP dispatch.
 
 Every second-slice mutation accepts an optional `If-Match` strong entity tag
 (the aggregate `version`), returns the new `ETag`, and accepts an optional
@@ -71,6 +75,19 @@ All paths preserve the first-slice surface and are additive under
 | `POST` | `/cancel` | Cancel with computed return premium |
 | `GET` | `/reinstatements` | Reinstatement history |
 | `POST` | `/reinstate` | Reinstate with approval and premium evidence |
+
+Billing is also exposed under `/api/v1/policies/{policyId}/billing` (the same
+controller keeps the `/internal/v1` alias for the domain adapter):
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/v1/policies/{policyId}/billing` | ACTIVE (else latest) plan and its installments; `404` when none |
+| `POST` | `/api/v1/policies/{policyId}/billing` | Create the plan and split the policy premium; `201`, `409` when an ACTIVE plan exists |
+| `PATCH` | `/api/v1/policies/{policyId}/billing/installments/{installmentId}` | Settle as `PAID` or `WAIVED`; same-status replay is a no-op, terminal-status switch is `409` |
+
+The plan response is `{"plan": {...}, "installments": [...]}`. Plan creation
+and settlement bump the policy aggregate version, so every billing outbox event
+has a distinct `aggregateVersion`.
 
 ## Cross-cutting API behavior
 

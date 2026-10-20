@@ -3,9 +3,10 @@
 ## Status
 
 The Policy expert implements the first slice (policy header, lifecycle,
-idempotent create, ETag/If-Match, canonical problems) and the second slice
+idempotent create, ETag/If-Match, canonical problems), the second slice
 (versions, coverage and limits, aggregate erosion, endorsements, insureds and
-locations, cancellation and reinstatement) from SPEC 11.2.
+locations, cancellation and reinstatement), and a billing slice (billing plan,
+installment schedule, and settlement) from SPEC 11.2.
 
 Policy writes also append canonical domain events to the platform transactional
 outbox (SPEC 7.5.1) in the same database transaction as the aggregate write.
@@ -20,7 +21,8 @@ outbox (SPEC 7.5.1) in the same database transaction as the aggregate write.
 | `EndorsementController` / `EndorsementService` / `EndorsementRepository` | Endorsements and the backdate gate |
 | `PolicyPartyController` / `PolicyPartyService` / `PolicyPartyRepository` | Insureds and locations |
 | `CancellationController` / `CancellationService` / `CancellationRepository` | Cancellation, return premium, reinstatement |
-| `PolicyRules`, `VersionTimeline`, `CoverageRules`, `CancellationRules`, `CancellationMath`, `PartyRules`, `EndorsementRules` | Pure invariants with focused unit tests |
+| `BillingController` / `BillingService` / `BillingRepository` | Billing plan, installment schedule, PAID/WAIVED settlement |
+| `PolicyRules`, `VersionTimeline`, `CoverageRules`, `CancellationRules`, `CancellationMath`, `PartyRules`, `EndorsementRules`, `BillingRules` | Pure invariants with focused unit tests |
 | `PolicyVersionHasher`, `VersionIssuer` | Canonical version snapshot hash and issuance |
 | `CommandIdempotency` | Per-command replay/conflict behaviour |
 | `PolicyEvents`, `PolicyOutboxSchedulingConfiguration` | Canonical event envelopes and the Quartz outbox dispatch job |
@@ -46,6 +48,8 @@ aggregate change and the event row:
 | `POST /internal/v1/policies/{id}/endorsements` | `policy.policy.endorsed` + `policy.policy.version-issued` |
 | `POST /internal/v1/policies/{id}/cancel` | `policy.policy.cancelled` + `policy.policy.version-issued` |
 | `POST /internal/v1/policies/{id}/reinstate` | `policy.policy.reinstated` + `policy.policy.version-issued` |
+| `POST /api/v1/policies/{id}/billing` | `policy.billing-plan-created` |
+| `PATCH /api/v1/policies/{id}/billing/installments/{installmentId}` | `policy.installment-paid` or `policy.installment-waived`; same-status replay writes nothing |
 
 Payloads carry `policyId`, `policyNumber`, `status`, `version`, the policy
 effective/expiration dates, premium and limit amounts as scale-4 decimal
@@ -68,6 +72,19 @@ emitted as specified; the catalog needs either these two additions or an agreed
 mapping to the existing lifecycle names. This is a contract mismatch owned by
 `eia-contracts`, not by this repository.
 
+The requested billing names (`policy.billing-plan-created`,
+`policy.installment-paid`, `policy.installment-waived`) have two dot-segments,
+while the platform `EventEnvelope` validator requires
+`{vertical}.{aggregate}.{verb}`. The outbox rows persist the exact requested
+names (so consumers and tests see them), but the canonical envelope is built
+from three-segment aliases (`policy.billing-plan.created`,
+`policy.installment.paid`, `policy.installment.waived`). Because
+`OutboxEvent.toEnvelope()` revalidates the stored `event_type`, dispatching one
+of these rows through the platform HTTP dispatcher fails. The platform
+validator or the event names must be aligned before enabling dispatch for
+billing events; this is reported to `eia-platform`/`eia-contracts` rather than
+worked around here.
+
 `policy.policy.version-issued` is emitted by the issue, endorsement,
 cancellation, and reinstatement commands. Coverage/insured/location changes can
 also issue a version, but those writes are outside the requested event set and
@@ -87,8 +104,10 @@ The live smoke is opt-in and requires PostgreSQL.
 
 ## Known SPEC gaps in this slice
 
-- Billing, premium receivables, producer payables, and dunning
-  (SPEC 11.2.13) are not implemented.
+- Billing exposure starts with the plan and installment schedule required by
+  this slice. Plan `COMPLETE`/`CANCELLED` transitions, dunning, receivables,
+  billing instructions, and SAP AR reconciliation (SPEC 11.2.13) are not
+  exposed yet.
 - Mass tort profile, coverage blocks, occurrences, layers, forms, exclusions,
   rating exposures, premium audit, and the claim/cession/reinsurance projections
   are not implemented.

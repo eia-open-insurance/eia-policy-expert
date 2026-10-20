@@ -60,6 +60,26 @@ class SchemaContractTest {
     }
 
     @Test
+    void schemaDefinesTheBillingPlanAndInstallmentTables() throws Exception {
+        String schema = schema();
+
+        assertThat(schema).contains("CREATE TABLE IF NOT EXISTS policy_billing_plan");
+        assertThat(schema).contains("total_premium NUMERIC(19,4) NOT NULL");
+        assertThat(schema).contains("installment_count INTEGER NOT NULL");
+        assertThat(schema).contains(
+                "CHECK (frequency IN ('MONTHLY', 'QUARTERLY', 'SEMI_ANNUAL', 'ANNUAL'))");
+        assertThat(schema).contains(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_policy_billing_plan_active");
+        assertThat(schema).contains("WHERE status = 'ACTIVE'");
+        assertThat(schema).contains("CREATE TABLE IF NOT EXISTS policy_installment");
+        assertThat(schema).contains(
+                "CONSTRAINT uq_policy_installment_number UNIQUE (plan_id, installment_number)");
+        assertThat(schema).contains("payment_id UUID");
+        assertThat(schema).contains(
+                "CHECK (status IN ('DUE', 'PAID', 'OVERDUE', 'WAIVED'))");
+    }
+
+    @Test
     void schemaMatchesThePlatformTransactionalOutbox() throws Exception {
         String schema = schema();
 

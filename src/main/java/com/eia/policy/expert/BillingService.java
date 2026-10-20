@@ -1,0 +1,183 @@
+package com.eia.policy.expert;
+
+import com.eia.platform.libs.outbox.OutboxEvent;
+import com.eia.platform.libs.outbox.OutboxRepository;
+import org.springframework.dao.DuplicateKeyException;
+import org.springframework.http.HttpStatus;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+
+/**
+ * Billing plan and installment slice (SPEC 11.2.13).
+ *
+ * <p>Creating a plan splits the policy premium across 1..24 installments and
+ * writes the plan, the schedule, and {@code policy.billing-plan-created} in one
+ * transaction. Settling an installment writes the row change and
+ * {@code policy.installment-paid} / {@code policy.installment-waived} in one
+ * transaction. Every mutation also bumps the policy aggregate version, both to
+ * guard concurrent billing commands and to give every outbox event a distinct
+ * {@code aggregateVersion} (the outbox unique key).</p>
+ */
+@Service
+public class BillingService {
+    private final PolicyRepository policyRepository;
+    private final BillingRepository billingRepository;
+    private final OutboxRepository outbox;
+
+    public BillingService(PolicyRepository policyRepository, BillingRepository billingRepository,
+                          OutboxRepository outbox) {
+        this.policyRepository = policyRepository;
+        this.billingRepository = billingRepository;
+        this.outbox = outbox;
+    }
+
+    /**
+     * Returns the ACTIVE plan and its schedule, or the most recently closed plan
+     * when no plan is active. A policy without any billing plan is a 404.
+     */
+    public BillingPlanView get(UUID tenantId, UUID policyId) {
+        requirePolicy(tenantId, policyId);
+        PolicyBillingPlan plan = billingRepository.findCurrentPlan(tenantId, policyId)
+                .orElseThrow(() -> PolicyErrors.notFound("BILLING_PLAN_NOT_FOUND", "policyId",
+                        "No billing plan exists for policy: " + policyId));
+        return new BillingPlanView(plan,
+                billingRepository.findInstallments(tenantId, plan.id()));
+    }
+
+    @Transactional
+    public BillingPlanView create(UUID tenantId, UUID policyId, CreateBillingPlanRequest request) {
+        Policy policy = requirePolicy(tenantId, policyId);
+        BillingRules.PlanSpec spec = BillingRules.validateCreate(request, policy);
+        if (billingRepository.findActivePlan(tenantId, policyId).isPresent()) {
+            throw activePlanConflict(policyId);
+        }
+
+        Instant now = Instant.now().truncatedTo(ChronoUnit.MICROS);
+        UUID planId = UUID.randomUUID();
+        PolicyBillingPlan plan = new PolicyBillingPlan(planId, tenantId, policyId,
+                billingRepository.nextPlanNumber(tenantId, policyId), spec.totalPremium(),
+                policy.premiumCurrency(), spec.installmentCount(), spec.frequency(),
+                spec.firstDueDate(), "ACTIVE", now);
+        List<PolicyInstallment> installments = new ArrayList<>(spec.installments().size());
+        for (BillingRules.InstallmentDraft draft : spec.installments()) {
+            installments.add(new PolicyInstallment(UUID.randomUUID(), tenantId, planId,
+                    draft.installmentNumber(), draft.dueDate(), draft.amount(), BillingRules.DUE,
+                    null, null, now));
+        }
+
+        try {
+            billingRepository.insertPlan(plan);
+            for (PolicyInstallment installment : installments) {
+                billingRepository.insertInstallment(installment);
+            }
+        } catch (DuplicateKeyException ex) {
+            // The PostgreSQL partial unique index is the concurrency arbiter for
+            // "one ACTIVE plan per policy"; H2 relies on the check above.
+            throw activePlanConflict(policyId);
+        }
+
+        Policy touched = touch(policy);
+        outbox.insert(PolicyEvents.billingPlanCreated(touched, plan, installments, now));
+        return new BillingPlanView(plan, List.copyOf(installments));
+    }
+
+    /**
+     * Settles one installment as PAID or WAIVED. Repeating the same terminal
+     * status is an idempotent no-op (no new event, no version bump); switching a
+     * settled installment to the other terminal status is a 409. A DUE or
+     * OVERDUE row can be settled exactly once because the UPDATE is conditional
+     * on its current status.
+     */
+    @Transactional
+    public PolicyInstallment updateInstallment(UUID tenantId, UUID policyId,
+                                               UUID installmentId,
+                                               UpdateInstallmentRequest request) {
+        Policy policy = requirePolicy(tenantId, policyId);
+        PolicyInstallment current = billingRepository
+                .findInstallment(tenantId, policyId, installmentId)
+                .orElseThrow(() -> installmentNotFound(installmentId));
+        String target = BillingRules.normalizeTargetStatus(request.status());
+
+        if (BillingRules.isSettled(current.status())) {
+            if (current.status().equals(target)) {
+                return current;
+            }
+            throw settledConflict(current);
+        }
+        if (!BillingRules.isSettleable(current.status())) {
+            throw PolicyErrors.conflict("INSTALLMENT_NOT_SETTLEABLE", "status",
+                    "Installment " + installmentId + " is in status " + current.status()
+                            + " and cannot be settled.");
+        }
+
+        Instant now = Instant.now().truncatedTo(ChronoUnit.MICROS);
+        Instant paidAt = BillingRules.PAID.equals(target) ? now : null;
+        UUID paymentId = BillingRules.PAID.equals(target) ? request.paymentId() : null;
+        int rows = billingRepository.updateStatus(tenantId, current.planId(), installmentId,
+                target, paidAt, paymentId, current.status());
+        if (rows == 0) {
+            PolicyInstallment raced = billingRepository
+                    .findInstallment(tenantId, policyId, installmentId)
+                    .orElseThrow(() -> installmentNotFound(installmentId));
+            if (raced.status().equals(target)) {
+                return raced;
+            }
+            throw settledConflict(raced);
+        }
+
+        PolicyBillingPlan plan = billingRepository.findPlan(tenantId, policyId, current.planId())
+                .orElseThrow(() -> new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,
+                        "INTERNAL_ERROR", "The billing plan for installment " + installmentId
+                        + " could not be reloaded."));
+        Policy touched = touch(policy);
+        PolicyInstallment updated = billingRepository
+                .findInstallment(tenantId, policyId, installmentId)
+                .orElseThrow(() -> installmentNotFound(installmentId));
+        OutboxEvent event = BillingRules.PAID.equals(target)
+                ? PolicyEvents.installmentPaid(touched, plan, updated, now)
+                : PolicyEvents.installmentWaived(touched, plan, updated, now);
+        outbox.insert(event);
+        return updated;
+    }
+
+    private Policy requirePolicy(UUID tenantId, UUID policyId) {
+        return policyRepository.findById(tenantId, policyId)
+                .orElseThrow(() -> PolicyErrors.notFound("POLICY_NOT_FOUND", "policyId",
+                        "Policy not found: " + policyId));
+    }
+
+    private Policy touch(Policy policy) {
+        int rows = policyRepository.touch(policy.tenantId(), policy.id(), policy.version());
+        if (rows == 0) {
+            throw PolicyErrors.conflict("CONCURRENT_MODIFICATION", "policyId",
+                    "The policy changed concurrently; reload and retry.");
+        }
+        return policyRepository.findById(policy.tenantId(), policy.id())
+                .orElseThrow(() -> PolicyErrors.notFound("POLICY_NOT_FOUND", "policyId",
+                        "Policy not found: " + policy.id()));
+    }
+
+    private static ApiException activePlanConflict(UUID policyId) {
+        return PolicyErrors.conflict("BILLING_PLAN_ALREADY_EXISTS", "policyId",
+                "An ACTIVE billing plan already exists for policy: " + policyId);
+    }
+
+    private static ApiException installmentNotFound(UUID installmentId) {
+        return PolicyErrors.notFound("INSTALLMENT_NOT_FOUND", "installmentId",
+                "Installment not found: " + installmentId);
+    }
+
+    private static ApiException settledConflict(PolicyInstallment installment) {
+        return PolicyErrors.conflict("INSTALLMENT_ALREADY_SETTLED", "status",
+                "Installment " + installment.id() + " is already " + installment.status() + ".",
+                Map.of("installmentId", installment.id().toString(),
+                        "currentStatus", installment.status()));
+    }
+}

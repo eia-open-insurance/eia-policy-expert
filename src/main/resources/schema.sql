@@ -381,6 +381,60 @@ CREATE TABLE IF NOT EXISTS policy_reinstatement (
 CREATE INDEX IF NOT EXISTS idx_policy_reinstatement_policy
     ON policy_reinstatement (tenant_id, policy_id, created_at DESC);
 
+-- Billing plan for a policy (SPEC 11.2.13). A policy has at most one ACTIVE
+-- plan at a time; the partial unique index is the concurrency arbiter for
+-- duplicate create commands. Installment amounts sum exactly to total_premium:
+-- the first n-1 rows are equal and the last row absorbs the rounding remainder.
+CREATE TABLE IF NOT EXISTS policy_billing_plan (
+    id UUID PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    policy_id UUID NOT NULL REFERENCES policy (id) ON DELETE CASCADE,
+    plan_number VARCHAR(32) NOT NULL,
+    total_premium NUMERIC(19,4) NOT NULL,
+    currency CHAR(3) NOT NULL,
+    installment_count INTEGER NOT NULL,
+    frequency VARCHAR(16) NOT NULL,
+    first_due_date DATE NOT NULL,
+    status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',
+    created_at TIMESTAMPTZ NOT NULL,
+    CONSTRAINT uq_policy_billing_plan_number UNIQUE (policy_id, plan_number),
+    CONSTRAINT ck_policy_billing_plan_premium CHECK (total_premium >= 0),
+    CONSTRAINT ck_policy_billing_plan_count CHECK (installment_count BETWEEN 1 AND 24),
+    CONSTRAINT ck_policy_billing_plan_frequency
+        CHECK (frequency IN ('MONTHLY', 'QUARTERLY', 'SEMI_ANNUAL', 'ANNUAL')),
+    CONSTRAINT ck_policy_billing_plan_status
+        CHECK (status IN ('ACTIVE', 'COMPLETE', 'CANCELLED'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_policy_billing_plan_active
+    ON policy_billing_plan (policy_id) WHERE status = 'ACTIVE';
+CREATE INDEX IF NOT EXISTS idx_policy_billing_plan_policy
+    ON policy_billing_plan (tenant_id, policy_id, created_at DESC);
+
+-- Scheduled installments of a billing plan. (plan_id, installment_number) is
+-- unique, so a retried create cannot double-book a due date. The tenant column
+-- is carried for the tenant wall and partition keys.
+CREATE TABLE IF NOT EXISTS policy_installment (
+    id UUID PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    plan_id UUID NOT NULL REFERENCES policy_billing_plan (id) ON DELETE CASCADE,
+    installment_number INTEGER NOT NULL,
+    due_date DATE NOT NULL,
+    amount NUMERIC(19,4) NOT NULL,
+    status VARCHAR(16) NOT NULL DEFAULT 'DUE',
+    paid_at TIMESTAMPTZ,
+    payment_id UUID,
+    created_at TIMESTAMPTZ NOT NULL,
+    CONSTRAINT uq_policy_installment_number UNIQUE (plan_id, installment_number),
+    CONSTRAINT ck_policy_installment_number CHECK (installment_number >= 1),
+    CONSTRAINT ck_policy_installment_amount CHECK (amount >= 0),
+    CONSTRAINT ck_policy_installment_status
+        CHECK (status IN ('DUE', 'PAID', 'OVERDUE', 'WAIVED'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_policy_installment_plan
+    ON policy_installment (tenant_id, plan_id, installment_number);
+
 -- Transactional outbox (SPEC 7.5.1). The canonical copy lives in
 -- eia-platform/libs/src/main/resources/db/outbox_event.sql; keep both in sync.
 CREATE TABLE IF NOT EXISTS outbox_event (
