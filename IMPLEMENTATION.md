@@ -5,7 +5,8 @@
 The Policy expert implements the first slice (policy header, lifecycle,
 idempotent create, ETag/If-Match, canonical problems), the second slice
 (versions, coverage and limits, aggregate erosion, endorsements, insureds and
-locations, cancellation and reinstatement), and a billing slice (billing plan,
+locations, cancellation and reinstatement), a renewal slice (new DRAFT term with
+predecessor lineage and copied terms), and a billing slice (billing plan,
 installment schedule, and settlement) from SPEC 11.2.
 
 Policy writes also append canonical domain events to the platform transactional
@@ -21,6 +22,7 @@ outbox (SPEC 7.5.1) in the same database transaction as the aggregate write.
 | `EndorsementController` / `EndorsementService` / `EndorsementRepository` | Endorsements and the backdate gate |
 | `PolicyPartyController` / `PolicyPartyService` / `PolicyPartyRepository` | Insureds and locations |
 | `CancellationController` / `CancellationService` / `CancellationRepository` | Cancellation, return premium, reinstatement |
+| `PolicyRenewalController` / `PolicyRenewalService` / `PolicyRenewalRules` | Renewal DRAFT creation, predecessor lineage, term inheritance |
 | `BillingController` / `BillingService` / `BillingRepository` | Billing plan, installment schedule, PAID/WAIVED settlement |
 | `PolicyRules`, `VersionTimeline`, `CoverageRules`, `CancellationRules`, `CancellationMath`, `PartyRules`, `EndorsementRules`, `BillingRules` | Pure invariants with focused unit tests |
 | `PolicyVersionHasher`, `VersionIssuer` | Canonical version snapshot hash and issuance |
@@ -48,6 +50,7 @@ aggregate change and the event row:
 | `POST /internal/v1/policies/{id}/endorsements` | `policy.policy.endorsed` + `policy.policy.version-issued` |
 | `POST /internal/v1/policies/{id}/cancel` | `policy.policy.cancelled` + `policy.policy.version-issued` |
 | `POST /internal/v1/policies/{id}/reinstate` | `policy.policy.reinstated` + `policy.policy.version-issued` |
+| `POST /api/v1/policies/{id}/renew` (also `/internal/v1` alias) | `policy.policy.renewed` |
 | `POST /api/v1/policies/{id}/billing` | `policy.billing-plan.created` |
 | `PATCH /api/v1/policies/{id}/billing/installments/{installmentId}` | `policy.installment.paid` or `policy.installment.waived`; same-status replay writes nothing |
 
@@ -62,8 +65,11 @@ return premium, approval references, and so on). The envelope carries
 ### Event-name mismatch report
 
 `policy.policy.version-issued`, `policy.policy.endorsed`,
-`policy.policy.cancelled`, and `policy.policy.reinstated` match
-`eia-contracts/asyncapi/policy.yaml`, `event-catalog.yaml`, and SPEC 11.2.9.
+`policy.policy.cancelled`, `policy.policy.reinstated`, and
+`policy.policy.renewed` match `eia-contracts/asyncapi/policy.yaml`,
+`event-catalog.yaml`, and SPEC 11.2.9. The renewed channel is still marked
+`x-status: planned` in the contract repository; the publisher now exists here,
+so that contract status can move to implemented.
 
 `policy.policy.created` and `policy.policy.updated` do **not** appear in any of
 those contracts. The catalog publishes lifecycle names (`quoted`, `bound`,
@@ -112,8 +118,10 @@ The live smoke is opt-in and requires PostgreSQL.
   SPEC 10.11 are not loaded.
 - Aggregate erosion is driven by the explicit `/erosion` endpoint; there is no
   event dispatcher or consumer for `direct.claim.*` events yet.
-- Version windows use one effective date plus a supersession cutover; there is
-  no multi-term renewal chain and no new-term approval path (SPEC POL-07).
+- Version windows use one effective date plus a supersession cutover. Renewal
+  creates a new DRAFT term with predecessor lineage, but the daily
+  `policy.renewal-batch`, renewal invitations, and new-term approval paths
+  (SPEC POL-07) are not exposed.
 - `policy` does not yet denormalize `cancelled_at`, `cancellation_effective_date`,
   or coverage totals; those live on the dedicated second-slice tables.
 - Legacy business error codes remain instead of the `EIA-XXX-NNNN` scheme

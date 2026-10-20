@@ -19,7 +19,8 @@ public class PolicyRepository {
     private static final String SELECT_COLUMNS = """
             SELECT id, tenant_id, policy_number, product_code, insured_party_id, status,
                    effective_date, expiration_date, premium_amount, premium_currency,
-                   limit_amount, limit_currency, version, created_at, updated_at
+                   limit_amount, limit_currency, version, created_at, updated_at,
+                   renewed_from_policy_id
               FROM policy
             """;
 
@@ -38,7 +39,8 @@ public class PolicyRepository {
             rs.getString("limit_currency"),
             rs.getInt("version"),
             rs.getTimestamp("created_at").toInstant(),
-            rs.getTimestamp("updated_at").toInstant()
+            rs.getTimestamp("updated_at").toInstant(),
+            rs.getObject("renewed_from_policy_id", UUID.class)
     );
 
     private final JdbcTemplate jdbc;
@@ -86,6 +88,15 @@ public class PolicyRepository {
     }
 
     public Policy create(CreatePolicyRequest request, UUID policyId) {
+        return create(request, policyId, null);
+    }
+
+    /**
+     * Inserts a policy row, optionally recording the policy it renews. Renewal
+     * uses this overload so the predecessor is written atomically with the new
+     * policy (SPEC 11.2.4 renewal lineage).
+     */
+    public Policy create(CreatePolicyRequest request, UUID policyId, UUID renewedFromPolicyId) {
         String status = PolicyRules.normalizeInitialStatus(request.status());
         String policyNumber = request.policyNumber() == null || request.policyNumber().isBlank()
                 ? nextPolicyNumber()
@@ -94,12 +105,14 @@ public class PolicyRepository {
         jdbc.update("""
                 INSERT INTO policy (id, tenant_id, policy_number, product_code, insured_party_id, status,
                                     effective_date, expiration_date, premium_amount, premium_currency,
-                                    limit_amount, limit_currency, version, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                                    limit_amount, limit_currency, renewed_from_policy_id, version,
+                                    created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
                 """, policyId, request.tenantId(), policyNumber, request.productCode().trim(),
                 request.insuredPartyId(), status, request.effectiveDate(), request.expirationDate(),
                 request.premiumAmount(), request.premiumCurrency(), request.limitAmount(),
-                request.limitCurrency(), Timestamp.from(now), Timestamp.from(now));
+                request.limitCurrency(), renewedFromPolicyId, Timestamp.from(now),
+                Timestamp.from(now));
         return findById(request.tenantId(), policyId).orElseThrow(() -> new ApiException(
                 HttpStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR",
                 "Created policy could not be reloaded."));

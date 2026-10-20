@@ -47,6 +47,11 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   same transaction as the plan/installment change.
 - `LivePostgresSmokeTest` opt-in live PostgreSQL flow through issue, coverage,
   endorsement, erosion, cancellation, and reinstatement.
+- Policy renewal slice: nullable `policy.renewed_from_policy_id` lineage with an
+  idempotent `ALTER`, `POST /api/v1/policies/{policyId}/renew` (plus the
+  `/internal/v1` alias), inherited term defaults, copied coverage/limit/insured/
+  location terms, and the `policy.policy.renewed` outbox event written in the
+  same transaction.
 
 ### Changed
 

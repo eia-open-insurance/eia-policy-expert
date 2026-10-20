@@ -24,6 +24,16 @@ class SchemaContractTest {
     }
 
     @Test
+    void schemaAddsRenewalLineageWithAnIdempotentAlter() throws Exception {
+        String schema = schema();
+
+        assertThat(schema).contains("renewed_from_policy_id UUID");
+        assertThat(schema).contains(
+                "ALTER TABLE policy ADD COLUMN IF NOT EXISTS renewed_from_policy_id UUID");
+        assertThat(schema).contains("idx_policy_renewed_from");
+    }
+
+    @Test
     void schemaIndexesTheStablePageOrder() throws Exception {
         String schema = schema();
 

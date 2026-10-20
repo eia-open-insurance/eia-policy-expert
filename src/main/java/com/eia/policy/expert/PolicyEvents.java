@@ -40,6 +40,7 @@ final class PolicyEvents {
     static final String ENDORSED = "policy.policy.endorsed";
     static final String CANCELLED = "policy.policy.cancelled";
     static final String REINSTATED = "policy.policy.reinstated";
+    static final String RENEWED = "policy.policy.renewed";
     static final String BILLING_PLAN_CREATED = "policy.billing-plan.created";
     static final String INSTALLMENT_PAID = "policy.installment.paid";
     static final String INSTALLMENT_WAIVED = "policy.installment.waived";
@@ -212,6 +213,21 @@ final class PolicyEvents {
         data.put("premiumEvidenceCurrency", reinstatement.premiumEvidenceCurrency());
         putVersion(data, version);
         return envelope(policy, REINSTATED, data, now);
+    }
+
+    /**
+     * Renewal creates a new DRAFT term without mutating the source, so the
+     * payload always carries both sides of the lineage: the source policy and
+     * the new policy, plus the new term dates, premium, and limit.
+     */
+    static EventEnvelope renewed(Policy source, Policy renewal, Instant now) {
+        Map<String, Object> data = base(renewal);
+        data.put("renewedFromPolicyId", renewal.renewedFromPolicyId());
+        data.put("sourcePolicyId", source.id());
+        data.put("sourcePolicyNumber", source.policyNumber());
+        data.put("newPolicyId", renewal.id());
+        data.put("newPolicyNumber", renewal.policyNumber());
+        return envelope(renewal, RENEWED, data, now);
     }
 
     private static Map<String, Object> base(Policy policy) {

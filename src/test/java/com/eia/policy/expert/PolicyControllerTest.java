@@ -153,6 +153,25 @@ class PolicyControllerTest {
     }
 
     @Test
+    void exposesRenewalLineageOnListAndGet() throws Exception {
+        UUID sourcePolicyId = UUID.fromString("44444444-4444-7444-8444-444444444444");
+        Policy renewed = policy("DRAFT", 0, sourcePolicyId);
+        when(repository.findPage(TENANT, 0, 20))
+                .thenReturn(new PolicyPageData(List.of(renewed), 1));
+        when(repository.findById(TENANT, POLICY_ID)).thenReturn(Optional.of(renewed));
+
+        mvc.perform(get("/internal/v1/policies").param("tenantId", TENANT.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items[0].renewedFromPolicyId")
+                        .value(sourcePolicyId.toString()));
+
+        mvc.perform(get("/internal/v1/policies/{id}", POLICY_ID)
+                        .param("tenantId", TENANT.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.renewedFromPolicyId").value(sourcePolicyId.toString()));
+    }
+
+    @Test
     void rejectsStaleIfMatchWithCanonicalConflict() throws Exception {
         when(repository.findById(TENANT, POLICY_ID)).thenReturn(Optional.of(policy("DRAFT", 2)));
 
@@ -378,8 +397,13 @@ class PolicyControllerTest {
     }
 
     private static Policy policy(String status, int version) {
+        return policy(status, version, null);
+    }
+
+    private static Policy policy(String status, int version, UUID renewedFromPolicyId) {
         return new Policy(POLICY_ID, TENANT, "POL-2026-0000001", "CGL", PARTY, status,
                 EFFECTIVE, EXPIRATION, new BigDecimal("125000.0000"), "USD",
-                new BigDecimal("2000000.0000"), "USD", version, CREATED, CREATED);
+                new BigDecimal("2000000.0000"), "USD", version, CREATED, CREATED,
+                renewedFromPolicyId);
     }
 }

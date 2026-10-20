@@ -42,9 +42,13 @@ contract structures from SPEC 11.2:
 - `policy_billing_plan` and `policy_installment`: one ACTIVE plan per policy,
   an equal premium split across 1..24 installments with the rounding remainder
   on the last row, and PAID/WAIVED settlement.
+- Policy renewal lineage: `policy.renewed_from_policy_id` points a renewal DRAFT
+  at the term it replaces. Renewal copies the source product, insured, coverage
+  grants, limits, insureds, and locations into the new term without mutating the
+  source policy.
 - `outbox_event`: canonical Policy events written in the same transaction as
   each covered mutation (`created`, `updated`, `version-issued`, `endorsed`,
-  `cancelled`, `reinstated`, `billing-plan.created`, `installment.paid`,
+  `cancelled`, `reinstated`, `renewed`, `billing-plan.created`, `installment.paid`,
   `installment.waived`), with conditional Quartz HTTP dispatch.
 
 Every second-slice mutation accepts an optional `If-Match` strong entity tag
@@ -75,6 +79,22 @@ All paths preserve the first-slice surface and are additive under
 | `POST` | `/cancel` | Cancel with computed return premium |
 | `GET` | `/reinstatements` | Reinstatement history |
 | `POST` | `/reinstate` | Reinstate with approval and premium evidence |
+
+Renewal is exposed under the external API path (and keeps the `/internal/v1`
+alias used by the domain adapter):
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/v1/policies/{policyId}/renew` | Create a new DRAFT renewal term from an `ISSUED`, `IN_FORCE`, `ENDORSED`, or `REINSTATED` policy; `201` with the new policy, `409 RENEWAL_NOT_ALLOWED` otherwise |
+
+The renew body carries `effectiveDate` (optional; defaults to the source
+expiration plus one day and must not precede the source expiration),
+`expirationDate` (required, after the effective date), and optional
+`premiumAmount`, `premiumCurrency`, `limitAmount`, and `limitCurrency` that
+default to the source policy. The source policy is never mutated; the new policy
+carries `renewedFromPolicyId` and copied coverage, limit, insured, and location
+terms rebound to the new term. `policy.policy.renewed` is written in the same
+transaction.
 
 Billing is also exposed under `/api/v1/policies/{policyId}/billing` (the same
 controller keeps the `/internal/v1` alias for the domain adapter):

@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS policy (
     premium_currency CHAR(3) NOT NULL,
     limit_amount NUMERIC(19,4) NOT NULL,
     limit_currency CHAR(3) NOT NULL,
+    renewed_from_policy_id UUID,
     version INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL,
@@ -34,8 +35,13 @@ CREATE TABLE IF NOT EXISTS policy (
     ))
 );
 
+-- Renewal lineage (SPEC 11.2.4). The column is nullable so every existing
+-- policy keeps working; the ALTER is idempotent for already-migrated databases.
+ALTER TABLE policy ADD COLUMN IF NOT EXISTS renewed_from_policy_id UUID;
+
 CREATE INDEX IF NOT EXISTS idx_policy_tenant_status ON policy (tenant_id, status);
 CREATE INDEX IF NOT EXISTS idx_policy_tenant_updated ON policy (tenant_id, updated_at DESC, id);
+CREATE INDEX IF NOT EXISTS idx_policy_renewed_from ON policy (tenant_id, renewed_from_policy_id);
 
 -- Idempotency scope for POST /internal/v1/policies: tenant + key. The unique
 -- constraint is the concurrency arbiter for duplicate creates. The row is
