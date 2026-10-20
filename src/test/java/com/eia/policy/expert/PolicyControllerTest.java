@@ -172,6 +172,24 @@ class PolicyControllerTest {
     }
 
     @Test
+    void exposesProgramIdOnListAndGet() throws Exception {
+        UUID programId = UUID.fromString("55555555-5555-7555-8555-555555555555");
+        Policy assigned = policy("DRAFT", 0, null, programId);
+        when(repository.findPage(TENANT, 0, 20))
+                .thenReturn(new PolicyPageData(List.of(assigned), 1));
+        when(repository.findById(TENANT, POLICY_ID)).thenReturn(Optional.of(assigned));
+
+        mvc.perform(get("/internal/v1/policies").param("tenantId", TENANT.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items[0].programId").value(programId.toString()));
+
+        mvc.perform(get("/internal/v1/policies/{id}", POLICY_ID)
+                        .param("tenantId", TENANT.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.programId").value(programId.toString()));
+    }
+
+    @Test
     void rejectsStaleIfMatchWithCanonicalConflict() throws Exception {
         when(repository.findById(TENANT, POLICY_ID)).thenReturn(Optional.of(policy("DRAFT", 2)));
 
@@ -397,13 +415,18 @@ class PolicyControllerTest {
     }
 
     private static Policy policy(String status, int version) {
-        return policy(status, version, null);
+        return policy(status, version, null, null);
     }
 
     private static Policy policy(String status, int version, UUID renewedFromPolicyId) {
+        return policy(status, version, renewedFromPolicyId, null);
+    }
+
+    private static Policy policy(String status, int version, UUID renewedFromPolicyId,
+                                 UUID programId) {
         return new Policy(POLICY_ID, TENANT, "POL-2026-0000001", "CGL", PARTY, status,
                 EFFECTIVE, EXPIRATION, new BigDecimal("125000.0000"), "USD",
                 new BigDecimal("2000000.0000"), "USD", version, CREATED, CREATED,
-                renewedFromPolicyId);
+                renewedFromPolicyId, programId);
     }
 }

@@ -71,6 +71,22 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   allocation notes and both coverage-block dates.
 - `policy.mass-tort-profile.updated` outbox event written in the same
   transaction as the profile upsert and policy version bump.
+- Commercial program catalog slice: idempotent `policy_program` table with a
+  tenant-unique `program_number`, `CAPTIVE`/`POOL`/`FRONTING`/`COINSURANCE`/
+  `MASS_TORT` type vocabulary, `ACTIVE`/`CLOSED` status, an inclusive effective
+  range, and an optional lead policy.
+- Nullable `policy.program_id` FK with an idempotent `ALTER`, a startup-safe FK
+  redefinition, and `(tenant_id, program_id)` index; the policy API projection
+  now carries `programId` on list, get, and mutation responses.
+- `POST`/`GET /api/v1/programs` and `GET /api/v1/programs/{id}` plus
+  `PATCH /api/v1/policies/{policyId}/program` (each also under `/internal/v1`)
+  with tenant-header/query scoping and the DIRECT-book gate. A null `programId`
+  clears the policy link, a foreign program is `404 PROGRAM_NOT_FOUND`, and
+  assignment/clear bumps the policy version and returns the new `ETag`.
+- `policy.program.created` (Program aggregate) and
+  `policy.policy.program-assigned` (policy aggregate, `programId` set or null)
+  outbox events written in the same transaction as the catalog row or policy
+  assignment.
 
 ### Changed
 

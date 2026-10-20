@@ -20,7 +20,7 @@ public class PolicyRepository {
             SELECT id, tenant_id, policy_number, product_code, insured_party_id, status,
                    effective_date, expiration_date, premium_amount, premium_currency,
                    limit_amount, limit_currency, version, created_at, updated_at,
-                   renewed_from_policy_id
+                   renewed_from_policy_id, program_id
               FROM policy
             """;
 
@@ -40,7 +40,8 @@ public class PolicyRepository {
             rs.getInt("version"),
             rs.getTimestamp("created_at").toInstant(),
             rs.getTimestamp("updated_at").toInstant(),
-            rs.getObject("renewed_from_policy_id", UUID.class)
+            rs.getObject("renewed_from_policy_id", UUID.class),
+            rs.getObject("program_id", UUID.class)
     );
 
     private final JdbcTemplate jdbc;
@@ -162,6 +163,20 @@ public class PolicyRepository {
                    SET version = version + 1, updated_at = ?
                  WHERE tenant_id = ? AND id = ? AND version = ?
                 """, Timestamp.from(Instant.now()), tenantId, id, expectedVersion);
+    }
+
+    /**
+     * Assigns or clears the policy program and bumps the aggregate version in a
+     * single conditional statement. Zero rows means the policy changed after it
+     * was read; the caller turns that into a canonical conflict.
+     */
+    public int assignProgram(UUID tenantId, UUID id, UUID programId, int expectedVersion,
+                             Instant now) {
+        return jdbc.update("""
+                UPDATE policy
+                   SET program_id = ?, version = version + 1, updated_at = ?
+                 WHERE tenant_id = ? AND id = ? AND version = ?
+                """, programId, Timestamp.from(now), tenantId, id, expectedVersion);
     }
 
     public Optional<CommandIdempotencyRecord> findCommandIdempotency(UUID tenantId, String scope,

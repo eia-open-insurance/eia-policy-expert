@@ -109,6 +109,34 @@ class SchemaContractTest {
     }
 
     @Test
+    void schemaDefinesTheProgramCatalogWithATenantUniqueNumberAndDateCheck() throws Exception {
+        String schema = schema();
+
+        assertThat(schema).contains("CREATE TABLE IF NOT EXISTS policy_program");
+        assertThat(schema).contains("CREATE SEQUENCE IF NOT EXISTS policy_program_number_seq");
+        assertThat(schema).contains(
+                "CONSTRAINT uq_policy_program_number UNIQUE (tenant_id, program_number)");
+        assertThat(schema).contains(
+                "CHECK (program_type IN (\n        'CAPTIVE', 'POOL', 'FRONTING', "
+                        + "'COINSURANCE', 'MASS_TORT'\n    ))");
+        assertThat(schema).contains("CHECK (status IN ('ACTIVE', 'CLOSED'))");
+        assertThat(schema).contains(
+                "CONSTRAINT ck_policy_program_dates CHECK (effective_to >= effective_from)");
+    }
+
+    @Test
+    void schemaAddsTheNullableProgramReferenceWithForeignKeyAndIndex() throws Exception {
+        String schema = schema();
+
+        assertThat(schema).contains("ALTER TABLE policy ADD COLUMN IF NOT EXISTS program_id UUID");
+        assertThat(schema).contains(
+                "ALTER TABLE policy DROP CONSTRAINT IF EXISTS fk_policy_program");
+        assertThat(schema).contains("FOREIGN KEY (program_id) REFERENCES policy_program (id)");
+        assertThat(schema).contains(
+                "CREATE INDEX IF NOT EXISTS idx_policy_program ON policy (tenant_id, program_id)");
+    }
+
+    @Test
     void schemaIndexesTheTenantWideReceivableScan() throws Exception {
         String schema = schema();
 

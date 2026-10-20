@@ -6,6 +6,7 @@ import com.eia.platform.libs.events.EventEnvelope;
 import com.eia.platform.libs.events.EventIds;
 import com.eia.platform.libs.events.EventMetadata;
 import com.eia.platform.libs.events.EventSubject;
+import com.fasterxml.jackson.databind.node.NullNode;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -46,11 +47,15 @@ final class PolicyEvents {
     static final String INSTALLMENT_WAIVED = "policy.installment.waived";
     static final String DUNNING_SENT = "policy.dunning.sent";
     static final String MASS_TORT_PROFILE_UPDATED = "policy.mass-tort-profile.updated";
+    static final String PROGRAM_CREATED = "policy.program.created";
+    static final String PROGRAM_ASSIGNED = "policy.policy.program-assigned";
 
     private static final Book EVENT_BOOK = Book.DIRECT;
     private static final String VERTICAL = "policy";
     private static final String AGGREGATE_TYPE = "Policy";
     private static final String SUBJECT_TYPE = "policy";
+    private static final String PROGRAM_AGGREGATE_TYPE = "Program";
+    private static final String PROGRAM_SUBJECT_TYPE = "program";
     private static final String SOURCE_BUILD = "eia-policy-expert@0.1.0-SNAPSHOT";
 
     private PolicyEvents() {
@@ -79,6 +84,72 @@ final class PolicyEvents {
                 ? List.of()
                 : installments.stream().map(PolicyEvents::installmentData).toList());
         return envelope(policy, BILLING_PLAN_CREATED, data, now);
+    }
+
+    /**
+     * A program is a catalog aggregate in the policy vertical, so its creation
+     * is reported as {@code policy.program.created} against the Program
+     * aggregate with aggregate version 1.
+     */
+    static EventEnvelope programCreated(PolicyProgram program, Instant now) {
+        Objects.requireNonNull(program, "program");
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("programId", program.id());
+        data.put("programNumber", program.programNumber());
+        data.put("name", program.name());
+        data.put("programType", program.programType());
+        data.put("effectiveFrom", date(program.effectiveFrom()));
+        data.put("effectiveTo", date(program.effectiveTo()));
+        data.put("status", program.status());
+        // The canonical event JSON omits null map values; a JSON null node keeps
+        // the nullable contract member present for consumers.
+        data.put("leadPolicyId",
+                program.leadPolicyId() == null ? NullNode.getInstance() : program.leadPolicyId());
+        data.put("createdAt", instant(program.createdAt()));
+        return programEnvelope(program, PROGRAM_CREATED, data, now);
+    }
+
+    /**
+     * Program assignment is a policy command: the policy aggregate version
+     * advances and the event always carries {@code programId}, which is null
+     * when the link is cleared.
+     */
+    static EventEnvelope programAssigned(Policy before, Policy after, Instant now) {
+        Objects.requireNonNull(before, "before");
+        Objects.requireNonNull(after, "after");
+        Map<String, Object> data = base(after);
+        data.put("programId",
+                after.programId() == null ? NullNode.getInstance() : after.programId());
+        data.put("previousProgramId",
+                before.programId() == null ? NullNode.getInstance() : before.programId());
+        data.put("changedFields", List.of("programId"));
+        return envelope(after, PROGRAM_ASSIGNED, data, now);
+    }
+
+    private static EventEnvelope programEnvelope(PolicyProgram program, String eventType,
+                                                 Map<String, Object> data, Instant now) {
+        UUID eventId = EventIds.deterministic(program.tenantId(), PROGRAM_AGGREGATE_TYPE,
+                program.id(), 1L, eventType);
+        return EventEnvelope.builder()
+                .eventId(eventId)
+                .eventType(eventType)
+                .eventVersion(1)
+                .occurredAt(now)
+                .recordedAt(now)
+                .tenantId(program.tenantId())
+                .book(EVENT_BOOK)
+                .vertical(VERTICAL)
+                .aggregateType(PROGRAM_AGGREGATE_TYPE)
+                .aggregateId(program.id())
+                .aggregateVersion(1)
+                .sequence(0)
+                .actor(EventActor.system("eia-policy-expert"))
+                .subject(EventSubject.of(VERTICAL, PROGRAM_SUBJECT_TYPE, program.id(),
+                        program.programNumber()))
+                .links(List.of())
+                .data(data)
+                .metadata(EventMetadata.v1(SOURCE_BUILD))
+                .build();
     }
 
     /**

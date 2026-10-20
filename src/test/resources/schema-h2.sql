@@ -4,6 +4,7 @@
 -- JSON payloads are TEXT in H2.
 
 CREATE SEQUENCE IF NOT EXISTS policy_number_seq START 1;
+CREATE SEQUENCE IF NOT EXISTS policy_program_number_seq START 1;
 
 CREATE TABLE IF NOT EXISTS policy (
     id UUID PRIMARY KEY,
@@ -20,6 +21,7 @@ CREATE TABLE IF NOT EXISTS policy (
     limit_amount NUMERIC(19,4) NOT NULL,
     limit_currency CHAR(3) NOT NULL,
     renewed_from_policy_id UUID,
+    program_id UUID,
     version INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL,
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
@@ -39,6 +41,39 @@ ALTER TABLE policy ADD COLUMN IF NOT EXISTS renewed_from_policy_id UUID;
 CREATE INDEX IF NOT EXISTS idx_policy_tenant_status ON policy (tenant_id, status);
 CREATE INDEX IF NOT EXISTS idx_policy_tenant_updated ON policy (tenant_id, updated_at DESC, id);
 CREATE INDEX IF NOT EXISTS idx_policy_renewed_from ON policy (tenant_id, renewed_from_policy_id);
+
+-- H2-compatible copy of the commercial program catalog. The CHECK constraints
+-- mirror the PostgreSQL DDL; the FK on policy is added after both tables exist.
+CREATE TABLE IF NOT EXISTS policy_program (
+    id UUID PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    program_number VARCHAR(32) NOT NULL,
+    name VARCHAR(200) NOT NULL,
+    program_type VARCHAR(32) NOT NULL,
+    effective_from DATE NOT NULL,
+    effective_to DATE NOT NULL,
+    status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',
+    lead_policy_id UUID,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    CONSTRAINT uq_policy_program_number UNIQUE (tenant_id, program_number),
+    CONSTRAINT ck_policy_program_type CHECK (program_type IN (
+        'CAPTIVE', 'POOL', 'FRONTING', 'COINSURANCE', 'MASS_TORT'
+    )),
+    CONSTRAINT ck_policy_program_status CHECK (status IN ('ACTIVE', 'CLOSED')),
+    CONSTRAINT ck_policy_program_dates CHECK (effective_to >= effective_from)
+);
+
+CREATE INDEX IF NOT EXISTS idx_policy_program_tenant_created
+    ON policy_program (tenant_id, created_at DESC, id);
+CREATE INDEX IF NOT EXISTS idx_policy_program_lead_policy
+    ON policy_program (tenant_id, lead_policy_id);
+
+ALTER TABLE policy ADD COLUMN IF NOT EXISTS program_id UUID;
+ALTER TABLE policy DROP CONSTRAINT IF EXISTS fk_policy_program;
+ALTER TABLE policy ADD CONSTRAINT fk_policy_program
+    FOREIGN KEY (program_id) REFERENCES policy_program (id);
+
+CREATE INDEX IF NOT EXISTS idx_policy_program ON policy (tenant_id, program_id);
 
 CREATE TABLE IF NOT EXISTS policy_idempotency (
     tenant_id UUID NOT NULL,

@@ -50,6 +50,11 @@ contract structures from SPEC 11.2:
   trigger theory, allocation method/notes, an inclusive coverage block, and
   DRAFT/COMPLETE status. A COMPLETE profile requires the notes and both block
   dates.
+- `policy_program`: the commercial program catalog (`CAPTIVE`, `POOL`,
+  `FRONTING`, `COINSURANCE`, `MASS_TORT`) with a tenant-unique program number,
+  an inclusive effective range, ACTIVE/CLOSED status, and an optional lead
+  policy. `policy.program_id` is a nullable FK to the catalog, so a policy can be
+  assigned to or cleared from one program.
 - Policy renewal lineage: `policy.renewed_from_policy_id` points a renewal DRAFT
   at the term it replaces. Renewal copies the source product, insured, coverage
   grants, limits, insureds, and locations into the new term without mutating the
@@ -57,8 +62,9 @@ contract structures from SPEC 11.2:
 - `outbox_event`: canonical Policy events written in the same transaction as
   each covered mutation (`created`, `updated`, `version-issued`, `endorsed`,
   `cancelled`, `reinstated`, `renewed`, `billing-plan.created`, `installment.paid`,
-  `installment.waived`, `dunning.sent`, `mass-tort-profile.updated`), with
-  conditional Quartz HTTP dispatch.
+  `installment.waived`, `dunning.sent`, `mass-tort-profile.updated`,
+  `program.created`, `policy.program-assigned`), with conditional Quartz HTTP
+  dispatch.
 
 Every second-slice mutation accepts an optional `If-Match` strong entity tag
 (the aggregate `version`), returns the new `ETag`, and accepts an optional
@@ -151,6 +157,28 @@ not precede the start), notes are capped at 2000 characters, and `COMPLETE`
 requires the notes and both block dates. Every accepted upsert bumps the policy
 aggregate version and writes `policy.mass-tort-profile.updated` in the same
 transaction.
+
+The commercial program catalog is exposed under `/api/v1/programs` and the
+assignment command under `/api/v1/policies/{policyId}/program` (both keep the
+`/internal/v1` alias for the domain adapter):
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/v1/programs` | Tenant-scoped program list, newest first |
+| `POST` | `/api/v1/programs` | Create an ACTIVE program; `201` with the generated `programNumber` |
+| `GET` | `/api/v1/programs/{id}` | One program; `404 PROGRAM_NOT_FOUND` |
+| `PATCH` | `/api/v1/policies/{policyId}/program` | Assign `{programId}` or clear with `{programId:null}`; bumps the policy version and returns the updated policy with its `ETag` |
+
+The create body is `{name, programType, effectiveFrom, effectiveTo,
+leadPolicyId?}`. `programType` is one of `CAPTIVE`, `POOL`, `FRONTING`,
+`COINSURANCE`, or `MASS_TORT` (case-insensitive, stored upper-case), and the
+effective range is inclusive, so a one-day program is valid while an end before
+the start is a `400 INVALID_PROGRAM_DATES`. The tenant comes from `?tenantId=` or
+`X-EIA-Tenant`; the route is fixed to the DIRECT book. Creating a program writes
+`policy.program.created` against the Program aggregate; assignment and clearing
+write `policy.policy.program-assigned` with `programId` set or `null` in the same
+transaction as the policy version bump. A program id from another tenant is a
+`404 PROGRAM_NOT_FOUND`.
 
 The tenant-wide premium receivables worklist is
 `GET /api/v1/billing/installments` (also exposed under

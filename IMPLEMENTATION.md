@@ -8,9 +8,10 @@ idempotent create, ETag/If-Match, canonical problems), the second slice
 locations, cancellation and reinstatement), a renewal slice (new DRAFT term with
 predecessor lineage and copied terms), a billing slice (billing plan,
 installment schedule, settlement, dunning actions, and the tenant-wide
-receivables read model), and a mass tort profile slice (one profile per policy
-with tort, trigger, allocation, coverage block, and DRAFT/COMPLETE gating) from
-SPEC 11.2.
+receivables read model), a mass tort profile slice (one profile per policy
+with tort, trigger, allocation, coverage block, and DRAFT/COMPLETE gating), and
+a commercial program catalog slice (tenant-unique programs plus the nullable
+`policy.program_id` assignment) from SPEC 11.2.
 
 Policy writes also append canonical domain events to the platform transactional
 outbox (SPEC 7.5.1) in the same database transaction as the aggregate write.
@@ -30,7 +31,8 @@ outbox (SPEC 7.5.1) in the same database transaction as the aggregate write.
 | `BillingDunningController` / `BillingDunningService` / `BillingDunningRepository` | Installment dunning actions, duplicate-level arbitration, and the dunning outbox event |
 | `BillingReceivablesController` / `ReceivableRow` / `InstallmentReceivable` | Tenant-wide premium receivables read model with derived overdue status and latest-SENT dunning enrichment |
 | `MassTortProfileController` / `MassTortProfileService` / `MassTortProfileRepository` | One-profile-per-policy upsert, COMPLETE gating, and the profile outbox event |
-| `PolicyRules`, `VersionTimeline`, `CoverageRules`, `CancellationRules`, `CancellationMath`, `PartyRules`, `EndorsementRules`, `BillingRules`, `MassTortProfileRules` | Pure invariants with focused unit tests |
+| `PolicyProgramController` / `PolicyProgramService` / `PolicyProgramRepository` | Commercial program catalog, policy assignment/clear, and the program outbox events |
+| `PolicyRules`, `VersionTimeline`, `CoverageRules`, `CancellationRules`, `CancellationMath`, `PartyRules`, `EndorsementRules`, `BillingRules`, `MassTortProfileRules`, `ProgramRules` | Pure invariants with focused unit tests |
 | `PolicyVersionHasher`, `VersionIssuer` | Canonical version snapshot hash and issuance |
 | `CommandIdempotency` | Per-command replay/conflict behaviour |
 | `PolicyEvents`, `PolicyOutboxSchedulingConfiguration` | Canonical event envelopes and the Quartz outbox dispatch job |
@@ -61,6 +63,8 @@ aggregate change and the event row:
 | `PATCH /api/v1/policies/{id}/billing/installments/{installmentId}` | `policy.installment.paid` or `policy.installment.waived`; same-status replay writes nothing |
 | `POST /api/v1/billing/installments/{installmentId}/dunning` (also `/internal/v1` alias) | `policy.dunning.sent`; each accepted action advances the policy version |
 | `PUT /api/v1/policies/{id}/mass-tort-profile` (also `/internal/v1` alias) | `policy.mass-tort-profile.updated`; every accepted upsert writes one event |
+| `POST /api/v1/programs` (also `/internal/v1` alias) | `policy.program.created` against the `Program` aggregate |
+| `PATCH /api/v1/policies/{id}/program` (also `/internal/v1` alias) | `policy.policy.program-assigned`; `programId` is null when the link is cleared, and every accepted command advances the policy version |
 
 Payloads carry `policyId`, `policyNumber`, `status`, `version`, the policy
 effective/expiration dates, premium and limit amounts as scale-4 decimal
@@ -69,6 +73,14 @@ strings with their ISO 4217 currencies, and the event-specific ids and facts
 return premium, approval references, and so on). The envelope carries
 `book=DIRECT`, `vertical=policy`, `aggregateType=Policy`,
 `aggregateVersion=policy.version()+1`, and a deterministic event id.
+
+`policy.program.created` is the exception to the policy-aggregate envelope: the
+program is itself a catalog aggregate, so the row carries `aggregateType=Program`,
+`aggregateId=programId`, and `aggregateVersion=1`. Its payload carries
+`programId`, `programNumber`, `name`, `programType`, the effective dates,
+`status`, `leadPolicyId`, and `createdAt`. The assignment event keeps the policy
+aggregate and carries `programId` (explicitly `null` on clear) and
+`previousProgramId`.
 
 ### Event-name mismatch report
 
@@ -110,6 +122,13 @@ The mass tort profile event uses the canonical
 (nullable for a DRAFT profile). The channel is still marked planned in the
 contract repository.
 
+The program catalog events are additive. `policy.program.created` is emitted
+against the `Program` aggregate and `policy.policy.program-assigned` against the
+policy; neither name is listed in `eia-contracts/asyncapi/policy.yaml` yet. The
+contract repository also still marks `GET /api/v1/programs` as planned; the
+expert now exposes the create/list/get surface plus the policy assignment
+command.
+
 `policy.policy.version-issued` is emitted by the issue, endorsement,
 cancellation, and reinstatement commands. Coverage/insured/location changes can
 also issue a version, but those writes are outside the requested event set and
@@ -138,6 +157,9 @@ The live smoke is opt-in and requires PostgreSQL.
   exposures, premium audit, and the claim/cession/reinsurance projections are
   not implemented. The profile itself is exposed, but the separate
   `policy_coverage_block` table is still a gap.
+- The program catalog is create/list/get plus policy assignment only. Program
+  lifecycle transitions (CLOSED), program edits, and lead-policy integrity are
+  not exposed: `lead_policy_id` is stored as an opaque UUID without a FK.
 - Coverage/limit rows are keyed by coverage code and unique active code; the
   full `coverage`, `coverage_type`, layer, and form reference tables from
   SPEC 10.11 are not loaded.

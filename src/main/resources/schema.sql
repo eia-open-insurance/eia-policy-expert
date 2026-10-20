@@ -6,6 +6,7 @@
 -- (SPEC 10.3). Percentages are decimal fractions with 6 fraction digits.
 
 CREATE SEQUENCE IF NOT EXISTS policy_number_seq START 1;
+CREATE SEQUENCE IF NOT EXISTS policy_program_number_seq START 1;
 
 CREATE TABLE IF NOT EXISTS policy (
     id UUID PRIMARY KEY,
@@ -22,6 +23,7 @@ CREATE TABLE IF NOT EXISTS policy (
     limit_amount NUMERIC(19,4) NOT NULL,
     limit_currency CHAR(3) NOT NULL,
     renewed_from_policy_id UUID,
+    program_id UUID,
     version INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL,
@@ -42,6 +44,45 @@ ALTER TABLE policy ADD COLUMN IF NOT EXISTS renewed_from_policy_id UUID;
 CREATE INDEX IF NOT EXISTS idx_policy_tenant_status ON policy (tenant_id, status);
 CREATE INDEX IF NOT EXISTS idx_policy_tenant_updated ON policy (tenant_id, updated_at DESC, id);
 CREATE INDEX IF NOT EXISTS idx_policy_renewed_from ON policy (tenant_id, renewed_from_policy_id);
+
+-- Commercial program catalog (SPEC 11.2.4 `policy.program_id` and the PROGRAM
+-- entity). A program groups policies for a portfolio such as a captive, pool,
+-- fronting arrangement, coinsurance facility, or mass tort program. The
+-- program number is generated per tenant and its date range is inclusive.
+CREATE TABLE IF NOT EXISTS policy_program (
+    id UUID PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    program_number VARCHAR(32) NOT NULL,
+    name VARCHAR(200) NOT NULL,
+    program_type VARCHAR(32) NOT NULL,
+    effective_from DATE NOT NULL,
+    effective_to DATE NOT NULL,
+    status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',
+    lead_policy_id UUID,
+    created_at TIMESTAMPTZ NOT NULL,
+    CONSTRAINT uq_policy_program_number UNIQUE (tenant_id, program_number),
+    CONSTRAINT ck_policy_program_type CHECK (program_type IN (
+        'CAPTIVE', 'POOL', 'FRONTING', 'COINSURANCE', 'MASS_TORT'
+    )),
+    CONSTRAINT ck_policy_program_status CHECK (status IN ('ACTIVE', 'CLOSED')),
+    CONSTRAINT ck_policy_program_dates CHECK (effective_to >= effective_from)
+);
+
+CREATE INDEX IF NOT EXISTS idx_policy_program_tenant_created
+    ON policy_program (tenant_id, created_at DESC, id);
+CREATE INDEX IF NOT EXISTS idx_policy_program_lead_policy
+    ON policy_program (tenant_id, lead_policy_id);
+
+-- Nullable policy-to-program link. The column is added with an idempotent ALTER
+-- so an already-migrated database picks it up. PostgreSQL has no
+-- ADD CONSTRAINT IF NOT EXISTS, so the FK is dropped and re-added on startup;
+-- that is idempotent and keeps the constraint definition in one place.
+ALTER TABLE policy ADD COLUMN IF NOT EXISTS program_id UUID;
+ALTER TABLE policy DROP CONSTRAINT IF EXISTS fk_policy_program;
+ALTER TABLE policy ADD CONSTRAINT fk_policy_program
+    FOREIGN KEY (program_id) REFERENCES policy_program (id);
+
+CREATE INDEX IF NOT EXISTS idx_policy_program ON policy (tenant_id, program_id);
 
 -- Idempotency scope for POST /internal/v1/policies: tenant + key. The unique
 -- constraint is the concurrency arbiter for duplicate creates. The row is
