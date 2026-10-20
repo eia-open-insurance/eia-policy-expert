@@ -3,6 +3,7 @@ package com.eia.policy.expert;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -21,6 +22,8 @@ final class BillingRules {
     static final int MIN_INSTALLMENTS = 1;
     static final int MAX_INSTALLMENTS = 24;
 
+    static final int MAX_RECEIVABLE_LIMIT = 200;
+
     static final String MONTHLY = "MONTHLY";
     static final String QUARTERLY = "QUARTERLY";
     static final String SEMI_ANNUAL = "SEMI_ANNUAL";
@@ -35,6 +38,7 @@ final class BillingRules {
             Set.of(MONTHLY, QUARTERLY, SEMI_ANNUAL, ANNUAL);
     private static final Set<String> SETTLEABLE = Set.of(DUE, OVERDUE);
     private static final Set<String> TERMINAL = Set.of(PAID, WAIVED);
+    private static final Set<String> RECEIVABLE = Set.of(DUE, OVERDUE);
 
     private BillingRules() {
     }
@@ -87,6 +91,52 @@ final class BillingRules {
 
     static boolean isSettleable(String status) {
         return SETTLEABLE.contains(status);
+    }
+
+    /**
+     * Normalizes the optional receivables status filter. A blank value keeps
+     * the default (all unsettled installments); anything outside the two
+     * receivable statuses is a 400.
+     */
+    static String normalizeReceivableStatus(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        String value = raw.trim().toUpperCase(Locale.ROOT);
+        if (!RECEIVABLE.contains(value)) {
+            throw PolicyErrors.badRequest("INVALID_INSTALLMENT_STATUS", "status",
+                    "status must be DUE or OVERDUE.");
+        }
+        return value;
+    }
+
+    /**
+     * Clamps the worklist size into 1..200. The default of 100 is applied by
+     * the controller, so a service caller always supplies an explicit limit.
+     */
+    static int normalizeReceivableLimit(int limit) {
+        return Math.min(Math.max(limit, 1), MAX_RECEIVABLE_LIMIT);
+    }
+
+    /**
+     * Effective status at read time. A stored DUE row past its due date is
+     * reported as OVERDUE; the stored row is never rewritten by the query.
+     */
+    static String effectiveStatus(String storedStatus, LocalDate dueDate, LocalDate today) {
+        if (OVERDUE.equals(storedStatus)) {
+            return OVERDUE;
+        }
+        if (DUE.equals(storedStatus) && dueDate != null && dueDate.isBefore(today)) {
+            return OVERDUE;
+        }
+        return storedStatus;
+    }
+
+    static long daysPastDue(String effectiveStatus, LocalDate dueDate, LocalDate today) {
+        if (!OVERDUE.equals(effectiveStatus) || dueDate == null) {
+            return 0L;
+        }
+        return Math.max(0L, ChronoUnit.DAYS.between(dueDate, today));
     }
 
     static List<InstallmentDraft> split(BigDecimal totalPremium, int installmentCount,

@@ -52,6 +52,14 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   `/internal/v1` alias), inherited term defaults, copied coverage/limit/insured/
   location terms, and the `policy.policy.renewed` outbox event written in the
   same transaction.
+- Tenant-wide premium receivables read model:
+  `GET /api/v1/billing/installments` joins `policy_installment`,
+  `policy_billing_plan`, and `policy` to return plan/policy identifiers and the
+  insured party, filters by effective `DUE`/`OVERDUE` status and an inclusive
+  `dueBefore` date, caps `limit` at 200, and derives overdue status and
+  `daysPastDue` without mutating rows.
+- Idempotent `idx_policy_installment_tenant_status_due` index on
+  `(tenant_id, status, due_date)` for the receivables scan.
 
 ### Changed
 

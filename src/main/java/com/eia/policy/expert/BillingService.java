@@ -3,12 +3,16 @@ package com.eia.policy.expert;
 import com.eia.platform.libs.events.EventEnvelope;
 import com.eia.platform.libs.outbox.OutboxEvent;
 import com.eia.platform.libs.outbox.OutboxRepository;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
+import java.time.Clock;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
@@ -31,12 +35,20 @@ public class BillingService {
     private final PolicyRepository policyRepository;
     private final BillingRepository billingRepository;
     private final OutboxRepository outbox;
+    private final Clock clock;
 
+    @Autowired
     public BillingService(PolicyRepository policyRepository, BillingRepository billingRepository,
                           OutboxRepository outbox) {
+        this(policyRepository, billingRepository, outbox, Clock.systemUTC());
+    }
+
+    BillingService(PolicyRepository policyRepository, BillingRepository billingRepository,
+                   OutboxRepository outbox, Clock clock) {
         this.policyRepository = policyRepository;
         this.billingRepository = billingRepository;
         this.outbox = outbox;
+        this.clock = clock;
     }
 
     /**
@@ -50,6 +62,43 @@ public class BillingService {
                         "No billing plan exists for policy: " + policyId));
         return new BillingPlanView(plan,
                 billingRepository.findInstallments(tenantId, plan.id()));
+    }
+
+    /**
+     * Tenant-wide premium receivables worklist. Only unsettled installments are
+     * returned; {@code status} optionally narrows the effective status (DUE or
+     * OVERDUE) and {@code dueBefore} is an inclusive due-date cutoff. Overdue is
+     * derived from the due date at read time, so a DUE row past its due date is
+     * reported as OVERDUE with a positive {@code daysPastDue} without the read
+     * mutating the stored row.
+     */
+    public ReceivablesView listReceivables(UUID tenantId, String rawStatus,
+                                           LocalDate dueBefore, int limit) {
+        String status = BillingRules.normalizeReceivableStatus(rawStatus);
+        int effectiveLimit = BillingRules.normalizeReceivableLimit(limit);
+        LocalDate today = LocalDate.now(clock);
+        List<InstallmentReceivable> items = billingRepository
+                .findReceivables(tenantId, status, today, dueBefore, effectiveLimit).stream()
+                .map(row -> toReceivable(row, today))
+                .toList();
+        BigDecimal totalAmount = items.stream()
+                .map(InstallmentReceivable::amount)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+        BigDecimal overdueAmount = items.stream()
+                .filter(item -> BillingRules.OVERDUE.equals(item.status()))
+                .map(InstallmentReceivable::amount)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+        return new ReceivablesView(items, Money.of(totalAmount), Money.of(overdueAmount),
+                items.size());
+    }
+
+    private static InstallmentReceivable toReceivable(ReceivableRow row, LocalDate today) {
+        String status = BillingRules.effectiveStatus(row.storedStatus(), row.dueDate(), today);
+        return new InstallmentReceivable(row.installmentId(), row.planId(), row.planNumber(),
+                row.policyId(), row.policyNumber(), row.insuredPartyId(), row.installmentNumber(),
+                row.dueDate(), row.amount(), row.currency(), status,
+                BillingRules.daysPastDue(status, row.dueDate(), today), row.paidAt(),
+                row.paymentId());
     }
 
     @Transactional

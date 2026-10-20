@@ -7,7 +7,8 @@ idempotent create, ETag/If-Match, canonical problems), the second slice
 (versions, coverage and limits, aggregate erosion, endorsements, insureds and
 locations, cancellation and reinstatement), a renewal slice (new DRAFT term with
 predecessor lineage and copied terms), and a billing slice (billing plan,
-installment schedule, and settlement) from SPEC 11.2.
+installment schedule, settlement, and the tenant-wide receivables read model)
+from SPEC 11.2.
 
 Policy writes also append canonical domain events to the platform transactional
 outbox (SPEC 7.5.1) in the same database transaction as the aggregate write.
@@ -24,6 +25,7 @@ outbox (SPEC 7.5.1) in the same database transaction as the aggregate write.
 | `CancellationController` / `CancellationService` / `CancellationRepository` | Cancellation, return premium, reinstatement |
 | `PolicyRenewalController` / `PolicyRenewalService` / `PolicyRenewalRules` | Renewal DRAFT creation, predecessor lineage, term inheritance |
 | `BillingController` / `BillingService` / `BillingRepository` | Billing plan, installment schedule, PAID/WAIVED settlement |
+| `BillingReceivablesController` / `ReceivableRow` / `InstallmentReceivable` | Tenant-wide premium receivables read model with derived overdue status |
 | `PolicyRules`, `VersionTimeline`, `CoverageRules`, `CancellationRules`, `CancellationMath`, `PartyRules`, `EndorsementRules`, `BillingRules` | Pure invariants with focused unit tests |
 | `PolicyVersionHasher`, `VersionIssuer` | Canonical version snapshot hash and issuance |
 | `CommandIdempotency` | Per-command replay/conflict behaviour |
@@ -106,10 +108,10 @@ The live smoke is opt-in and requires PostgreSQL.
 
 ## Known SPEC gaps in this slice
 
-- Billing exposure starts with the plan and installment schedule required by
-  this slice. Plan `COMPLETE`/`CANCELLED` transitions, dunning, receivables,
-  billing instructions, and SAP AR reconciliation (SPEC 11.2.13) are not
-  exposed yet.
+- Billing exposure starts with the plan, installment schedule, PAID/WAIVED
+  settlement required by this slice, and the tenant-wide receivables read model.
+  Plan `COMPLETE`/`CANCELLED` transitions, dunning, billing instructions, and
+  SAP AR reconciliation (SPEC 11.2.13) are not exposed yet.
 - Mass tort profile, coverage blocks, occurrences, layers, forms, exclusions,
   rating exposures, premium audit, and the claim/cession/reinsurance projections
   are not implemented.

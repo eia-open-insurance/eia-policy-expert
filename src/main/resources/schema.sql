@@ -441,6 +441,10 @@ CREATE TABLE IF NOT EXISTS policy_installment (
 CREATE INDEX IF NOT EXISTS idx_policy_installment_plan
     ON policy_installment (tenant_id, plan_id, installment_number);
 
+-- Tenant-wide receivables worklist: filter unsettled installments by due date.
+CREATE INDEX IF NOT EXISTS idx_policy_installment_tenant_status_due
+    ON policy_installment (tenant_id, status, due_date);
+
 -- Transactional outbox (SPEC 7.5.1). The canonical copy lives in
 -- eia-platform/libs/src/main/resources/db/outbox_event.sql; keep both in sync.
 CREATE TABLE IF NOT EXISTS outbox_event (

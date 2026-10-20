@@ -109,6 +109,24 @@ The plan response is `{"plan": {...}, "installments": [...]}`. Plan creation
 and settlement bump the policy aggregate version, so every billing outbox event
 has a distinct `aggregateVersion`.
 
+The tenant-wide premium receivables worklist is
+`GET /api/v1/billing/installments`:
+
+| Query | Meaning |
+|---|---|
+| `status` | optional `DUE` or `OVERDUE` (effective status); defaults to both |
+| `dueBefore` | optional inclusive `YYYY-MM-DD` due-date cutoff |
+| `limit` | default 100, clamped to 1..200 |
+
+The tenant comes from `X-EIA-Tenant` or `?tenantId=`, and the route is fixed to
+the DIRECT book: a missing `X-EIA-Book` is treated as DIRECT and another book is
+`404`. The response is `{items, totalAmount, overdueAmount, count}` with items
+ordered by `due_date ASC, policy_number ASC, installment_number ASC`. Each item
+joins the plan, policy, and installment so it carries `planNumber`,
+`policyNumber`, and `insuredPartyId`. Overdue is derived at read time: a stored
+`DUE` installment past its due date is returned as `OVERDUE` with
+`daysPastDue > 0`, and the stored row is never mutated.
+
 ## Cross-cutting API behavior
 
 - Errors are canonical `application/problem+json` (SPEC 6.11 / 12.2) with

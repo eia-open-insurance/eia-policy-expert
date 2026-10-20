@@ -90,6 +90,15 @@ class SchemaContractTest {
     }
 
     @Test
+    void schemaIndexesTheTenantWideReceivableScan() throws Exception {
+        String schema = schema();
+
+        assertThat(schema).contains(
+                "CREATE INDEX IF NOT EXISTS idx_policy_installment_tenant_status_due");
+        assertThat(schema).contains("ON policy_installment (tenant_id, status, due_date)");
+    }
+
+    @Test
     void schemaMatchesThePlatformTransactionalOutbox() throws Exception {
         String schema = schema();
 

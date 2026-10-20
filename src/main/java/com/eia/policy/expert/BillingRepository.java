@@ -7,6 +7,7 @@ import org.springframework.stereotype.Repository;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -58,6 +59,25 @@ public class BillingRepository {
                 paidAt == null ? null : paidAt.toInstant(),
                 rs.getObject("payment_id", UUID.class),
                 rs.getTimestamp("created_at").toInstant()
+        );
+    };
+
+    private static final RowMapper<ReceivableRow> RECEIVABLE_MAPPER = (rs, rowNum) -> {
+        Timestamp paidAt = rs.getTimestamp("paid_at");
+        return new ReceivableRow(
+                rs.getObject("installment_id", UUID.class),
+                rs.getObject("plan_id", UUID.class),
+                rs.getString("plan_number"),
+                rs.getObject("policy_id", UUID.class),
+                rs.getString("policy_number"),
+                rs.getObject("insured_party_id", UUID.class),
+                rs.getInt("installment_number"),
+                rs.getObject("due_date", LocalDate.class),
+                rs.getBigDecimal("amount"),
+                rs.getString("currency"),
+                rs.getString("status"),
+                paidAt == null ? null : paidAt.toInstant(),
+                rs.getObject("payment_id", UUID.class)
         );
     };
 
@@ -122,6 +142,55 @@ public class BillingRepository {
                  WHERE tenant_id = ? AND plan_id = ?
                  ORDER BY installment_number ASC
                 """, INSTALLMENT_MAPPER, tenantId, planId);
+    }
+
+    /**
+     * Tenant-wide outstanding installments for the receivables worklist. The
+     * plan and policy joins carry the plan number, policy number, and insured
+     * party; all three tenant columns are checked so a mismatched row can never
+     * leak across tenants. The optional status filter is applied to the
+     * effective status (a stored DUE row past its due date counts as OVERDUE),
+     * and {@code dueBefore} is an inclusive cutoff.
+     */
+    public List<ReceivableRow> findReceivables(UUID tenantId, String status, LocalDate today,
+                                               LocalDate dueBefore, int limit) {
+        StringBuilder sql = new StringBuilder("""
+                SELECT i.id AS installment_id, p.id AS plan_id, p.plan_number,
+                       pol.id AS policy_id, pol.policy_number, pol.insured_party_id,
+                       i.installment_number, i.due_date, i.amount, p.currency,
+                       i.status, i.paid_at, i.payment_id
+                  FROM policy_installment i
+                  JOIN policy_billing_plan p ON p.id = i.plan_id
+                  JOIN policy pol ON pol.id = p.policy_id
+                 WHERE i.tenant_id = ? AND p.tenant_id = ? AND pol.tenant_id = ?
+                """);
+        List<Object> args = new ArrayList<>(7);
+        args.add(tenantId);
+        args.add(tenantId);
+        args.add(tenantId);
+        if (status == null) {
+            sql.append("   AND i.status IN ('DUE', 'OVERDUE')\n");
+        } else if ("DUE".equals(status)) {
+            sql.append("   AND i.status = ? AND i.due_date >= ?\n");
+            args.add("DUE");
+            args.add(today);
+        } else {
+            sql.append("   AND (i.status = ? OR (i.status = ? AND i.due_date < ?))\n");
+            args.add("OVERDUE");
+            args.add("DUE");
+            args.add(today);
+        }
+        if (dueBefore != null) {
+            sql.append("   AND i.due_date <= ?\n");
+            args.add(dueBefore);
+        }
+        sql.append("""
+                 ORDER BY i.due_date ASC, pol.policy_number ASC,
+                          i.installment_number ASC, i.id ASC
+                 LIMIT ?
+                """);
+        args.add(limit);
+        return jdbc.query(sql.toString(), RECEIVABLE_MAPPER, args.toArray());
     }
 
     /**
