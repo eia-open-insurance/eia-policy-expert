@@ -110,7 +110,8 @@ and settlement bump the policy aggregate version, so every billing outbox event
 has a distinct `aggregateVersion`.
 
 The tenant-wide premium receivables worklist is
-`GET /api/v1/billing/installments`:
+`GET /api/v1/billing/installments` (also exposed under
+`/internal/v1/billing/installments` for the Policy domain adapter):
 
 | Query | Meaning |
 |---|---|

@@ -15,10 +15,15 @@ import java.util.UUID;
  * routes this read spans every policy in the tenant: it joins
  * {@code policy_installment}, {@code policy_billing_plan}, and {@code policy}
  * so the plan number, policy number, and insured party are available in one
- * query. The service is fixed to the DIRECT book.
+ * query. The service is fixed to the DIRECT book. The public route is also
+ * exposed under the service's internal prefix so the Policy domain adapter can
+ * reach the same read.
  */
 @RestController
-@RequestMapping("/api/v1/billing/installments")
+@RequestMapping({
+        "/api/v1/billing/installments",
+        "/internal/v1/billing/installments"
+})
 public class BillingReceivablesController {
     private final BillingService service;
 

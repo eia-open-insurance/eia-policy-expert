@@ -93,6 +93,18 @@ class BillingReceivablesControllerTest {
     }
 
     @Test
+    void keepsTheInternalAliasForTheDomainAdapter() throws Exception {
+        when(service.listReceivables(eq(TENANT), isNull(), isNull(), eq(100)))
+                .thenReturn(view());
+
+        mvc.perform(get("/internal/v1/billing/installments")
+                        .param("tenantId", TENANT.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items[0].policyNumber").value("POL-0001"))
+                .andExpect(jsonPath("$.count").value(1));
+    }
+
+    @Test
     void rejectsAnotherBook() throws Exception {
         mvc.perform(get("/api/v1/billing/installments")
                         .header("X-EIA-Tenant", TENANT.toString())
