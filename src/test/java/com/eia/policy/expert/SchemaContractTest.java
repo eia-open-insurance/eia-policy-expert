@@ -90,6 +90,25 @@ class SchemaContractTest {
     }
 
     @Test
+    void schemaDefinesTheMassTortProfileAndItsUpsertArbiter() throws Exception {
+        String schema = schema();
+
+        assertThat(schema).contains("CREATE TABLE IF NOT EXISTS policy_mass_tort_profile");
+        assertThat(schema).contains("policy_id UUID NOT NULL REFERENCES policy (id)");
+        assertThat(schema).contains(
+                "CONSTRAINT uq_policy_mass_tort_profile_policy UNIQUE (policy_id)");
+        assertThat(schema).contains("tort_type IN (");
+        assertThat(schema).contains("'ASBESTOS', 'SILICA', 'TALC', 'PFAS', 'OPIOIDS'");
+        assertThat(schema).contains("trigger_type IN (");
+        assertThat(schema).contains("'EXPOSURE', 'MANIFESTATION', 'INJURY', 'REVISIONIST'");
+        assertThat(schema).contains("allocation_method IN (");
+        assertThat(schema).contains("'PRO_RATA_TIME_ON_RISK'");
+        assertThat(schema).contains("CONSTRAINT ck_policy_mass_tort_profile_complete");
+        assertThat(schema).contains("CONSTRAINT ck_policy_mass_tort_profile_block");
+        assertThat(schema).contains("idx_policy_mass_tort_profile_tenant");
+    }
+
+    @Test
     void schemaIndexesTheTenantWideReceivableScan() throws Exception {
         String schema = schema();
 

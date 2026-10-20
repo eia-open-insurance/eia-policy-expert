@@ -6,9 +6,10 @@ The Policy expert implements the first slice (policy header, lifecycle,
 idempotent create, ETag/If-Match, canonical problems), the second slice
 (versions, coverage and limits, aggregate erosion, endorsements, insureds and
 locations, cancellation and reinstatement), a renewal slice (new DRAFT term with
-predecessor lineage and copied terms), and a billing slice (billing plan,
-installment schedule, settlement, and the tenant-wide receivables read model)
-from SPEC 11.2.
+predecessor lineage and copied terms), a billing slice (billing plan,
+installment schedule, settlement, and the tenant-wide receivables read model),
+and a mass tort profile slice (one profile per policy with tort, trigger,
+allocation, coverage block, and DRAFT/COMPLETE gating) from SPEC 11.2.
 
 Policy writes also append canonical domain events to the platform transactional
 outbox (SPEC 7.5.1) in the same database transaction as the aggregate write.
@@ -26,7 +27,8 @@ outbox (SPEC 7.5.1) in the same database transaction as the aggregate write.
 | `PolicyRenewalController` / `PolicyRenewalService` / `PolicyRenewalRules` | Renewal DRAFT creation, predecessor lineage, term inheritance |
 | `BillingController` / `BillingService` / `BillingRepository` | Billing plan, installment schedule, PAID/WAIVED settlement |
 | `BillingReceivablesController` / `ReceivableRow` / `InstallmentReceivable` | Tenant-wide premium receivables read model with derived overdue status |
-| `PolicyRules`, `VersionTimeline`, `CoverageRules`, `CancellationRules`, `CancellationMath`, `PartyRules`, `EndorsementRules`, `BillingRules` | Pure invariants with focused unit tests |
+| `MassTortProfileController` / `MassTortProfileService` / `MassTortProfileRepository` | One-profile-per-policy upsert, COMPLETE gating, and the profile outbox event |
+| `PolicyRules`, `VersionTimeline`, `CoverageRules`, `CancellationRules`, `CancellationMath`, `PartyRules`, `EndorsementRules`, `BillingRules`, `MassTortProfileRules` | Pure invariants with focused unit tests |
 | `PolicyVersionHasher`, `VersionIssuer` | Canonical version snapshot hash and issuance |
 | `CommandIdempotency` | Per-command replay/conflict behaviour |
 | `PolicyEvents`, `PolicyOutboxSchedulingConfiguration` | Canonical event envelopes and the Quartz outbox dispatch job |
@@ -55,6 +57,7 @@ aggregate change and the event row:
 | `POST /api/v1/policies/{id}/renew` (also `/internal/v1` alias) | `policy.policy.renewed` |
 | `POST /api/v1/policies/{id}/billing` | `policy.billing-plan.created` |
 | `PATCH /api/v1/policies/{id}/billing/installments/{installmentId}` | `policy.installment.paid` or `policy.installment.waived`; same-status replay writes nothing |
+| `PUT /api/v1/policies/{id}/mass-tort-profile` (also `/internal/v1` alias) | `policy.mass-tort-profile.updated`; every accepted upsert writes one event |
 
 Payloads carry `policyId`, `policyNumber`, `status`, `version`, the policy
 effective/expiration dates, premium and limit amounts as scale-4 decimal
@@ -89,6 +92,14 @@ needs these additive entries. Billing payloads carry `policyId`,
 (plan creation) or the settled installment facts (`installmentId`, `number`,
 `amount`, `currency`, `status`, `paymentId`).
 
+The mass tort profile event uses the canonical
+`policy.mass-tort-profile.updated` name already declared in
+`eia-contracts/asyncapi/policy.yaml` and `event-catalog.yaml`; its payload is
+`policyId`, `policyNumber`, the profile `status`, `tortType`, `triggerType`,
+`allocationMethod`, and the ISO-8601 `coverageBlockStart`/`coverageBlockEnd`
+(nullable for a DRAFT profile). The channel is still marked planned in the
+contract repository.
+
 `policy.policy.version-issued` is emitted by the issue, endorsement,
 cancellation, and reinstatement commands. Coverage/insured/location changes can
 also issue a version, but those writes are outside the requested event set and
@@ -112,9 +123,10 @@ The live smoke is opt-in and requires PostgreSQL.
   settlement required by this slice, and the tenant-wide receivables read model.
   Plan `COMPLETE`/`CANCELLED` transitions, dunning, billing instructions, and
   SAP AR reconciliation (SPEC 11.2.13) are not exposed yet.
-- Mass tort profile, coverage blocks, occurrences, layers, forms, exclusions,
-  rating exposures, premium audit, and the claim/cession/reinsurance projections
-  are not implemented.
+- Mass tort coverage blocks, occurrences, layers, forms, exclusions, rating
+  exposures, premium audit, and the claim/cession/reinsurance projections are
+  not implemented. The profile itself is exposed, but the separate
+  `policy_coverage_block` table is still a gap.
 - Coverage/limit rows are keyed by coverage code and unique active code; the
   full `coverage`, `coverage_type`, layer, and form reference tables from
   SPEC 10.11 are not loaded.

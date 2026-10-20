@@ -445,6 +445,50 @@ CREATE INDEX IF NOT EXISTS idx_policy_installment_plan
 CREATE INDEX IF NOT EXISTS idx_policy_installment_tenant_status_due
     ON policy_installment (tenant_id, status, due_date);
 
+-- Mass tort policy profile (SPEC 11.2.4 `policy_mass_tort_profile`). One row
+-- per policy; the unique policy_id is the upsert arbiter. A COMPLETE profile
+-- requires the allocation notes and both coverage-block dates, so Direct Claims
+-- never receives a complete profile that cannot drive allocation.
+CREATE TABLE IF NOT EXISTS policy_mass_tort_profile (
+    id UUID PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    policy_id UUID NOT NULL REFERENCES policy (id) ON DELETE CASCADE,
+    tort_type VARCHAR(32) NOT NULL,
+    trigger_type VARCHAR(32) NOT NULL,
+    allocation_method VARCHAR(32) NOT NULL,
+    allocation_notes TEXT,
+    coverage_block_start DATE,
+    coverage_block_end DATE,
+    status VARCHAR(16) NOT NULL DEFAULT 'DRAFT',
+    updated_at TIMESTAMPTZ NOT NULL,
+    CONSTRAINT uq_policy_mass_tort_profile_policy UNIQUE (policy_id),
+    CONSTRAINT ck_policy_mass_tort_profile_tort CHECK (tort_type IN (
+        'ASBESTOS', 'SILICA', 'TALC', 'PFAS', 'OPIOIDS', 'PRODUCT_LIABILITY',
+        'ENVIRONMENTAL', 'OTHER'
+    )),
+    CONSTRAINT ck_policy_mass_tort_profile_trigger CHECK (trigger_type IN (
+        'EXPOSURE', 'MANIFESTATION', 'INJURY', 'REVISIONIST'
+    )),
+    CONSTRAINT ck_policy_mass_tort_profile_allocation CHECK (allocation_method IN (
+        'ALL_SUMS', 'PRO_RATA_TIME_ON_RISK', 'PRO_RATA_PREMIUM', 'EQUAL_SHARES',
+        'STACKED_LIMITS', 'CUSTOM_MATRIX'
+    )),
+    CONSTRAINT ck_policy_mass_tort_profile_status CHECK (status IN ('DRAFT', 'COMPLETE')),
+    CONSTRAINT ck_policy_mass_tort_profile_block CHECK (
+        coverage_block_start IS NULL OR coverage_block_end IS NULL
+        OR coverage_block_end >= coverage_block_start
+    ),
+    CONSTRAINT ck_policy_mass_tort_profile_complete CHECK (
+        status <> 'COMPLETE'
+        OR (tort_type IS NOT NULL AND trigger_type IS NOT NULL
+            AND allocation_method IS NOT NULL AND allocation_notes IS NOT NULL
+            AND coverage_block_start IS NOT NULL AND coverage_block_end IS NOT NULL)
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_policy_mass_tort_profile_tenant
+    ON policy_mass_tort_profile (tenant_id, policy_id);
+
 -- Transactional outbox (SPEC 7.5.1). The canonical copy lives in
 -- eia-platform/libs/src/main/resources/db/outbox_event.sql; keep both in sync.
 CREATE TABLE IF NOT EXISTS outbox_event (

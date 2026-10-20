@@ -61,6 +61,16 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   rows.
 - Idempotent `idx_policy_installment_tenant_status_due` index on
   `(tenant_id, status, due_date)` for the receivables scan.
+- Mass tort profile slice: idempotent `policy_mass_tort_profile` table with one
+  profile per policy (`uq_policy_mass_tort_profile_policy`), a `DRAFT`/`COMPLETE`
+  status, tort/trigger/allocation vocabularies, an inclusive coverage block, and
+  a 2000-character allocation-notes cap.
+- `GET`/`PUT /api/v1/policies/{policyId}/mass-tort-profile` (plus the
+  `/internal/v1` alias) with tenant-header/query scoping, a DIRECT-book gate, a
+  `201` create / `200` update upsert, and `COMPLETE` validation requiring the
+  allocation notes and both coverage-block dates.
+- `policy.mass-tort-profile.updated` outbox event written in the same
+  transaction as the profile upsert and policy version bump.
 
 ### Changed
 

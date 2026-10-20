@@ -44,6 +44,7 @@ final class PolicyEvents {
     static final String BILLING_PLAN_CREATED = "policy.billing-plan.created";
     static final String INSTALLMENT_PAID = "policy.installment.paid";
     static final String INSTALLMENT_WAIVED = "policy.installment.waived";
+    static final String MASS_TORT_PROFILE_UPDATED = "policy.mass-tort-profile.updated";
 
     private static final Book EVENT_BOOK = Book.DIRECT;
     private static final String VERTICAL = "policy";
@@ -77,6 +78,27 @@ final class PolicyEvents {
                 ? List.of()
                 : installments.stream().map(PolicyEvents::installmentData).toList());
         return envelope(policy, BILLING_PLAN_CREATED, data, now);
+    }
+
+    /**
+     * The profile payload is the allocation contract consumed by Direct Claims:
+     * the tort, trigger theory, allocation method, and coverage block, plus the
+     * profile status. The profile id is deliberately not part of the payload;
+     * the policy is the aggregate and the event is keyed by its version.
+     */
+    static EventEnvelope massTortProfileUpdated(Policy policy, PolicyMassTortProfile profile,
+                                                Instant now) {
+        Objects.requireNonNull(profile, "profile");
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("policyId", policy.id());
+        data.put("policyNumber", policy.policyNumber());
+        data.put("status", profile.status());
+        data.put("tortType", profile.tortType());
+        data.put("triggerType", profile.triggerType());
+        data.put("allocationMethod", profile.allocationMethod());
+        data.put("coverageBlockStart", date(profile.coverageBlockStart()));
+        data.put("coverageBlockEnd", date(profile.coverageBlockEnd()));
+        return envelope(policy, MASS_TORT_PROFILE_UPDATED, data, now);
     }
 
     static EventEnvelope installmentPaid(Policy policy, PolicyBillingPlan plan,

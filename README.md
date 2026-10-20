@@ -42,6 +42,10 @@ contract structures from SPEC 11.2:
 - `policy_billing_plan` and `policy_installment`: one ACTIVE plan per policy,
   an equal premium split across 1..24 installments with the rounding remainder
   on the last row, and PAID/WAIVED settlement.
+- `policy_mass_tort_profile`: one profile per policy carrying the tort type,
+  trigger theory, allocation method/notes, an inclusive coverage block, and
+  DRAFT/COMPLETE status. A COMPLETE profile requires the notes and both block
+  dates.
 - Policy renewal lineage: `policy.renewed_from_policy_id` points a renewal DRAFT
   at the term it replaces. Renewal copies the source product, insured, coverage
   grants, limits, insureds, and locations into the new term without mutating the
@@ -49,7 +53,8 @@ contract structures from SPEC 11.2:
 - `outbox_event`: canonical Policy events written in the same transaction as
   each covered mutation (`created`, `updated`, `version-issued`, `endorsed`,
   `cancelled`, `reinstated`, `renewed`, `billing-plan.created`, `installment.paid`,
-  `installment.waived`), with conditional Quartz HTTP dispatch.
+  `installment.waived`, `mass-tort-profile.updated`), with conditional Quartz HTTP
+  dispatch.
 
 Every second-slice mutation accepts an optional `If-Match` strong entity tag
 (the aggregate `version`), returns the new `ETag`, and accepts an optional
@@ -108,6 +113,24 @@ controller keeps the `/internal/v1` alias for the domain adapter):
 The plan response is `{"plan": {...}, "installments": [...]}`. Plan creation
 and settlement bump the policy aggregate version, so every billing outbox event
 has a distinct `aggregateVersion`.
+
+The mass tort profile is exposed under
+`/api/v1/policies/{policyId}/mass-tort-profile` (the same controller keeps the
+`/internal/v1` alias for the domain adapter):
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/v1/policies/{policyId}/mass-tort-profile` | Current profile; `404 MASS_TORT_PROFILE_NOT_FOUND` when the policy has none |
+| `PUT` | `/api/v1/policies/{policyId}/mass-tort-profile` | Upsert the profile; `201` when created, `200` when updated |
+
+The body carries `tortType`, `triggerType`, `allocationMethod`, optional
+`allocationNotes`, optional `coverageBlockStart`/`coverageBlockEnd`, and
+`status`. The tenant comes from `?tenantId=` or `X-EIA-Tenant`; the route is
+fixed to the DIRECT book. Dates are an inclusive block (`coverageBlockEnd` may
+not precede the start), notes are capped at 2000 characters, and `COMPLETE`
+requires the notes and both block dates. Every accepted upsert bumps the policy
+aggregate version and writes `policy.mass-tort-profile.updated` in the same
+transaction.
 
 The tenant-wide premium receivables worklist is
 `GET /api/v1/billing/installments` (also exposed under
