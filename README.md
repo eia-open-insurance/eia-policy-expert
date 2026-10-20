@@ -42,6 +42,10 @@ contract structures from SPEC 11.2:
 - `policy_billing_plan` and `policy_installment`: one ACTIVE plan per policy,
   an equal premium split across 1..24 installments with the rounding remainder
   on the last row, and PAID/WAIVED settlement.
+- `billing_dunning_action`: one reminder/notice/collections action per
+  installment and escalation level, with channel, notes, status, and sent time.
+  The unique `(tenant_id, installment_id, level)` key is the duplicate-send
+  arbiter.
 - `policy_mass_tort_profile`: one profile per policy carrying the tort type,
   trigger theory, allocation method/notes, an inclusive coverage block, and
   DRAFT/COMPLETE status. A COMPLETE profile requires the notes and both block
@@ -53,8 +57,8 @@ contract structures from SPEC 11.2:
 - `outbox_event`: canonical Policy events written in the same transaction as
   each covered mutation (`created`, `updated`, `version-issued`, `endorsed`,
   `cancelled`, `reinstated`, `renewed`, `billing-plan.created`, `installment.paid`,
-  `installment.waived`, `mass-tort-profile.updated`), with conditional Quartz HTTP
-  dispatch.
+  `installment.waived`, `dunning.sent`, `mass-tort-profile.updated`), with
+  conditional Quartz HTTP dispatch.
 
 Every second-slice mutation accepts an optional `If-Match` strong entity tag
 (the aggregate `version`), returns the new `ETag`, and accepts an optional
@@ -114,6 +118,22 @@ The plan response is `{"plan": {...}, "installments": [...]}`. Plan creation
 and settlement bump the policy aggregate version, so every billing outbox event
 has a distinct `aggregateVersion`.
 
+Dunning is exposed under the tenant-wide billing path (the same controller keeps
+the `/internal/v1` alias for the domain adapter):
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/v1/billing/installments/{installmentId}/dunning` | Record a `REMINDER`, `FIRST_NOTICE`, `SECOND_NOTICE`, or `COLLECTIONS` action over `EMAIL`, `LETTER`, or `PORTAL`; `201`, `409 INSTALLMENT_NOT_DUNNABLE` for PAID/WAIVED, `409 DUNNING_ALREADY_SENT` for a repeated level |
+| `GET` | `/api/v1/billing/installments/{installmentId}/dunning` | Dunning history, newest first |
+
+The body is `{level, channel, notes?}`. The tenant comes from `?tenantId=` or
+`X-EIA-Tenant`, and the route is fixed to the DIRECT book. An installment is
+dunnable while its effective status is `DUE` or `OVERDUE`, so a stored `DUE` row
+past its due date is dunnable. Notes are trimmed and capped at 2000 characters.
+Every accepted action bumps the policy aggregate version and writes
+`policy.dunning.sent` (`policyId`, `policyNumber`, `installmentId`, `level`,
+`channel`, `sentAt`, `status`) in the same transaction.
+
 The mass tort profile is exposed under
 `/api/v1/policies/{policyId}/mass-tort-profile` (the same controller keeps the
 `/internal/v1` alias for the domain adapter):
@@ -149,7 +169,10 @@ ordered by `due_date ASC, policy_number ASC, installment_number ASC`. Each item
 joins the plan, policy, and installment so it carries `planNumber`,
 `policyNumber`, and `insuredPartyId`. Overdue is derived at read time: a stored
 `DUE` installment past its due date is returned as `OVERDUE` with
-`daysPastDue > 0`, and the stored row is never mutated.
+`daysPastDue > 0`, and the stored row is never mutated. Each item also carries
+`lastDunningLevel` and `lastDunningAt` from the latest `SENT` dunning action
+for the installment (both `null` when it has never been dunned; cancelled
+history is ignored).
 
 ## Cross-cutting API behavior
 

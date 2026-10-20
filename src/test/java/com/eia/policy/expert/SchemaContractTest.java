@@ -118,6 +118,26 @@ class SchemaContractTest {
     }
 
     @Test
+    void schemaDefinesDunningActionsWithTheLevelArbiter() throws Exception {
+        String schema = schema();
+
+        assertThat(schema).contains("CREATE TABLE IF NOT EXISTS billing_dunning_action");
+        assertThat(schema).contains(
+                "installment_id UUID NOT NULL REFERENCES policy_installment (id)");
+        assertThat(schema).contains(
+                "CONSTRAINT uq_billing_dunning_action_level");
+        assertThat(schema).contains("UNIQUE (tenant_id, installment_id, level)");
+        assertThat(schema).contains(
+                "'REMINDER', 'FIRST_NOTICE', 'SECOND_NOTICE', 'COLLECTIONS'");
+        assertThat(schema).contains("CHECK (channel IN ('EMAIL', 'LETTER', 'PORTAL'))");
+        assertThat(schema).contains("CHECK (status IN ('SENT', 'CANCELLED'))");
+        assertThat(schema).contains(
+                "CREATE INDEX IF NOT EXISTS idx_billing_dunning_action_installment");
+        assertThat(schema).contains(
+                "CREATE INDEX IF NOT EXISTS idx_billing_dunning_action_policy");
+    }
+
+    @Test
     void schemaMatchesThePlatformTransactionalOutbox() throws Exception {
         String schema = schema();
 

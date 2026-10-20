@@ -445,6 +445,40 @@ CREATE INDEX IF NOT EXISTS idx_policy_installment_plan
 CREATE INDEX IF NOT EXISTS idx_policy_installment_tenant_status_due
     ON policy_installment (tenant_id, status, due_date);
 
+-- Dunning actions taken against an installment (SPEC 11.2.13). One action per
+-- escalation level per installment: the unique constraint is the concurrency
+-- arbiter for duplicate sends and also enforces the escalation history. plan_id
+-- and policy_id are carried so policy-level dunning reads and the receivables
+-- enrichment never need a second join.
+CREATE TABLE IF NOT EXISTS billing_dunning_action (
+    id UUID PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    installment_id UUID NOT NULL REFERENCES policy_installment (id) ON DELETE CASCADE,
+    plan_id UUID NOT NULL,
+    policy_id UUID NOT NULL,
+    level VARCHAR(16) NOT NULL,
+    channel VARCHAR(16) NOT NULL,
+    notes TEXT,
+    status VARCHAR(16) NOT NULL DEFAULT 'SENT',
+    sent_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    CONSTRAINT uq_billing_dunning_action_level
+        UNIQUE (tenant_id, installment_id, level),
+    CONSTRAINT ck_billing_dunning_action_level CHECK (level IN (
+        'REMINDER', 'FIRST_NOTICE', 'SECOND_NOTICE', 'COLLECTIONS'
+    )),
+    CONSTRAINT ck_billing_dunning_action_channel
+        CHECK (channel IN ('EMAIL', 'LETTER', 'PORTAL')),
+    CONSTRAINT ck_billing_dunning_action_status CHECK (status IN ('SENT', 'CANCELLED'))
+);
+
+-- Newest-first dunning history for one installment and the latest-SENT lookup
+-- used to enrich the receivables worklist.
+CREATE INDEX IF NOT EXISTS idx_billing_dunning_action_installment
+    ON billing_dunning_action (tenant_id, installment_id, sent_at DESC);
+CREATE INDEX IF NOT EXISTS idx_billing_dunning_action_policy
+    ON billing_dunning_action (tenant_id, policy_id, sent_at DESC);
+
 -- Mass tort policy profile (SPEC 11.2.4 `policy_mass_tort_profile`). One row
 -- per policy; the unique policy_id is the upsert arbiter. A COMPLETE profile
 -- requires the allocation notes and both coverage-block dates, so Direct Claims

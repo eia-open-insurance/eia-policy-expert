@@ -8,6 +8,7 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.UUID;
@@ -30,6 +31,7 @@ class BillingReceivablesControllerTest {
     private static final UUID PARTY_ID = UUID.fromString("22222222-2222-7222-8222-222222222222");
     private static final LocalDate DUE = LocalDate.of(2026, 6, 1);
     private static final LocalDate DUE_BEFORE = LocalDate.of(2026, 6, 30);
+    private static final Instant DUNNING_AT = Instant.parse("2026-06-10T09:00:00Z");
 
     @Autowired
     private MockMvc mvc;
@@ -59,6 +61,8 @@ class BillingReceivablesControllerTest {
                 .andExpect(jsonPath("$.items[0].currency").value("USD"))
                 .andExpect(jsonPath("$.items[0].status").value("OVERDUE"))
                 .andExpect(jsonPath("$.items[0].daysPastDue").value(14))
+                .andExpect(jsonPath("$.items[0].lastDunningLevel").value("FIRST_NOTICE"))
+                .andExpect(jsonPath("$.items[0].lastDunningAt").value("2026-06-10T09:00:00Z"))
                 .andExpect(jsonPath("$.totalAmount").value("1000.0000"))
                 .andExpect(jsonPath("$.overdueAmount").value("1000.0000"))
                 .andExpect(jsonPath("$.count").value(1));
@@ -156,7 +160,7 @@ class BillingReceivablesControllerTest {
     private static ReceivablesView view() {
         InstallmentReceivable item = new InstallmentReceivable(INSTALLMENT_ID, PLAN_ID, "BP-0001",
                 POLICY_ID, "POL-0001", PARTY_ID, 1, DUE, new BigDecimal("1000.0000"), "USD",
-                "OVERDUE", 14, null, null);
+                "OVERDUE", 14, null, null, "FIRST_NOTICE", DUNNING_AT);
         return new ReceivablesView(List.of(item), new BigDecimal("1000.0000"),
                 new BigDecimal("1000.0000"), 1);
     }

@@ -44,6 +44,7 @@ final class PolicyEvents {
     static final String BILLING_PLAN_CREATED = "policy.billing-plan.created";
     static final String INSTALLMENT_PAID = "policy.installment.paid";
     static final String INSTALLMENT_WAIVED = "policy.installment.waived";
+    static final String DUNNING_SENT = "policy.dunning.sent";
     static final String MASS_TORT_PROFILE_UPDATED = "policy.mass-tort-profile.updated";
 
     private static final Book EVENT_BOOK = Book.DIRECT;
@@ -99,6 +100,25 @@ final class PolicyEvents {
         data.put("coverageBlockStart", date(profile.coverageBlockStart()));
         data.put("coverageBlockEnd", date(profile.coverageBlockEnd()));
         return envelope(policy, MASS_TORT_PROFILE_UPDATED, data, now);
+    }
+
+    /**
+     * A dunning action is a policy-level collection fact: the payload carries
+     * the policy, the dunned installment, the escalation level, the delivery
+     * channel, the send instant, and the action status. The policy aggregate
+     * version advances with the action, so every dunning event is distinct.
+     */
+    static EventEnvelope dunningSent(Policy policy, BillingDunningAction action, Instant now) {
+        Objects.requireNonNull(action, "action");
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("policyId", policy.id());
+        data.put("policyNumber", policy.policyNumber());
+        data.put("installmentId", action.installmentId());
+        data.put("level", action.level());
+        data.put("channel", action.channel());
+        data.put("sentAt", instant(action.sentAt()));
+        data.put("status", action.status());
+        return envelope(policy, DUNNING_SENT, data, now);
     }
 
     static EventEnvelope installmentPaid(Policy policy, PolicyBillingPlan plan,

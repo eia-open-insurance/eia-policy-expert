@@ -7,9 +7,10 @@ idempotent create, ETag/If-Match, canonical problems), the second slice
 (versions, coverage and limits, aggregate erosion, endorsements, insureds and
 locations, cancellation and reinstatement), a renewal slice (new DRAFT term with
 predecessor lineage and copied terms), a billing slice (billing plan,
-installment schedule, settlement, and the tenant-wide receivables read model),
-and a mass tort profile slice (one profile per policy with tort, trigger,
-allocation, coverage block, and DRAFT/COMPLETE gating) from SPEC 11.2.
+installment schedule, settlement, dunning actions, and the tenant-wide
+receivables read model), and a mass tort profile slice (one profile per policy
+with tort, trigger, allocation, coverage block, and DRAFT/COMPLETE gating) from
+SPEC 11.2.
 
 Policy writes also append canonical domain events to the platform transactional
 outbox (SPEC 7.5.1) in the same database transaction as the aggregate write.
@@ -26,7 +27,8 @@ outbox (SPEC 7.5.1) in the same database transaction as the aggregate write.
 | `CancellationController` / `CancellationService` / `CancellationRepository` | Cancellation, return premium, reinstatement |
 | `PolicyRenewalController` / `PolicyRenewalService` / `PolicyRenewalRules` | Renewal DRAFT creation, predecessor lineage, term inheritance |
 | `BillingController` / `BillingService` / `BillingRepository` | Billing plan, installment schedule, PAID/WAIVED settlement |
-| `BillingReceivablesController` / `ReceivableRow` / `InstallmentReceivable` | Tenant-wide premium receivables read model with derived overdue status |
+| `BillingDunningController` / `BillingDunningService` / `BillingDunningRepository` | Installment dunning actions, duplicate-level arbitration, and the dunning outbox event |
+| `BillingReceivablesController` / `ReceivableRow` / `InstallmentReceivable` | Tenant-wide premium receivables read model with derived overdue status and latest-SENT dunning enrichment |
 | `MassTortProfileController` / `MassTortProfileService` / `MassTortProfileRepository` | One-profile-per-policy upsert, COMPLETE gating, and the profile outbox event |
 | `PolicyRules`, `VersionTimeline`, `CoverageRules`, `CancellationRules`, `CancellationMath`, `PartyRules`, `EndorsementRules`, `BillingRules`, `MassTortProfileRules` | Pure invariants with focused unit tests |
 | `PolicyVersionHasher`, `VersionIssuer` | Canonical version snapshot hash and issuance |
@@ -57,6 +59,7 @@ aggregate change and the event row:
 | `POST /api/v1/policies/{id}/renew` (also `/internal/v1` alias) | `policy.policy.renewed` |
 | `POST /api/v1/policies/{id}/billing` | `policy.billing-plan.created` |
 | `PATCH /api/v1/policies/{id}/billing/installments/{installmentId}` | `policy.installment.paid` or `policy.installment.waived`; same-status replay writes nothing |
+| `POST /api/v1/billing/installments/{installmentId}/dunning` (also `/internal/v1` alias) | `policy.dunning.sent`; each accepted action advances the policy version |
 | `PUT /api/v1/policies/{id}/mass-tort-profile` (also `/internal/v1` alias) | `policy.mass-tort-profile.updated`; every accepted upsert writes one event |
 
 Payloads carry `policyId`, `policyNumber`, `status`, `version`, the policy
@@ -92,6 +95,13 @@ needs these additive entries. Billing payloads carry `policyId`,
 (plan creation) or the settled installment facts (`installmentId`, `number`,
 `amount`, `currency`, `status`, `paymentId`).
 
+`policy.dunning.sent` follows the same three-segment form and carries
+`policyId`, `policyNumber`, `installmentId`, `level`, `channel`, `sentAt`, and
+`status`. Dunning is allowed only while the installment's effective status is
+DUE or OVERDUE; one action per `(tenant, installment, level)` is enforced by
+the table's unique constraint, so a race surfaces as `409 DUNNING_ALREADY_SENT`.
+The event name is additive and still needs a contract entry.
+
 The mass tort profile event uses the canonical
 `policy.mass-tort-profile.updated` name already declared in
 `eia-contracts/asyncapi/policy.yaml` and `event-catalog.yaml`; its payload is
@@ -120,9 +130,10 @@ The live smoke is opt-in and requires PostgreSQL.
 ## Known SPEC gaps in this slice
 
 - Billing exposure starts with the plan, installment schedule, PAID/WAIVED
-  settlement required by this slice, and the tenant-wide receivables read model.
-  Plan `COMPLETE`/`CANCELLED` transitions, dunning, billing instructions, and
-  SAP AR reconciliation (SPEC 11.2.13) are not exposed yet.
+  settlement required by this slice, dunning actions, and the tenant-wide
+  receivables read model. Plan `COMPLETE`/`CANCELLED` transitions, dunning
+  cancellation/retry, billing instructions, and SAP AR reconciliation
+  (SPEC 11.2.13) are not exposed yet.
 - Mass tort coverage blocks, occurrences, layers, forms, exclusions, rating
   exposures, premium audit, and the claim/cession/reinsurance projections are
   not implemented. The profile itself is exposed, but the separate

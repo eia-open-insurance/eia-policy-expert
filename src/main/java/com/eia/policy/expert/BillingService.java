@@ -98,7 +98,7 @@ public class BillingService {
                 row.policyId(), row.policyNumber(), row.insuredPartyId(), row.installmentNumber(),
                 row.dueDate(), row.amount(), row.currency(), status,
                 BillingRules.daysPastDue(status, row.dueDate(), today), row.paidAt(),
-                row.paymentId());
+                row.paymentId(), row.lastDunningLevel(), row.lastDunningAt());
     }
 
     @Transactional

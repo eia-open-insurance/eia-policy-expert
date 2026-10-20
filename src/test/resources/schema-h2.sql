@@ -394,6 +394,35 @@ CREATE INDEX IF NOT EXISTS idx_policy_installment_plan
 CREATE INDEX IF NOT EXISTS idx_policy_installment_tenant_status_due
     ON policy_installment (tenant_id, status, due_date);
 
+-- H2-compatible copy of the dunning table. The unique (tenant, installment,
+-- level) key is the duplicate-send arbiter in both dialects.
+CREATE TABLE IF NOT EXISTS billing_dunning_action (
+    id UUID PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    installment_id UUID NOT NULL REFERENCES policy_installment (id) ON DELETE CASCADE,
+    plan_id UUID NOT NULL,
+    policy_id UUID NOT NULL,
+    level VARCHAR(16) NOT NULL,
+    channel VARCHAR(16) NOT NULL,
+    notes TEXT,
+    status VARCHAR(16) NOT NULL DEFAULT 'SENT',
+    sent_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    CONSTRAINT uq_billing_dunning_action_level
+        UNIQUE (tenant_id, installment_id, level),
+    CONSTRAINT ck_billing_dunning_action_level CHECK (level IN (
+        'REMINDER', 'FIRST_NOTICE', 'SECOND_NOTICE', 'COLLECTIONS'
+    )),
+    CONSTRAINT ck_billing_dunning_action_channel
+        CHECK (channel IN ('EMAIL', 'LETTER', 'PORTAL')),
+    CONSTRAINT ck_billing_dunning_action_status CHECK (status IN ('SENT', 'CANCELLED'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_billing_dunning_action_installment
+    ON billing_dunning_action (tenant_id, installment_id, sent_at DESC);
+CREATE INDEX IF NOT EXISTS idx_billing_dunning_action_policy
+    ON billing_dunning_action (tenant_id, policy_id, sent_at DESC);
+
 -- H2-compatible copy of the mass tort profile table. The unique policy_id is
 -- the upsert arbiter and the CHECK constraints mirror the PostgreSQL DDL.
 CREATE TABLE IF NOT EXISTS policy_mass_tort_profile (

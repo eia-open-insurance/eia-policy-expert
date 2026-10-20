@@ -64,6 +64,7 @@ public class BillingRepository {
 
     private static final RowMapper<ReceivableRow> RECEIVABLE_MAPPER = (rs, rowNum) -> {
         Timestamp paidAt = rs.getTimestamp("paid_at");
+        Timestamp lastDunningAt = rs.getTimestamp("last_dunning_at");
         return new ReceivableRow(
                 rs.getObject("installment_id", UUID.class),
                 rs.getObject("plan_id", UUID.class),
@@ -77,7 +78,9 @@ public class BillingRepository {
                 rs.getString("currency"),
                 rs.getString("status"),
                 paidAt == null ? null : paidAt.toInstant(),
-                rs.getObject("payment_id", UUID.class)
+                rs.getObject("payment_id", UUID.class),
+                rs.getString("last_dunning_level"),
+                lastDunningAt == null ? null : lastDunningAt.toInstant()
         );
     };
 
@@ -150,7 +153,9 @@ public class BillingRepository {
      * party; all three tenant columns are checked so a mismatched row can never
      * leak across tenants. The optional status filter is applied to the
      * effective status (a stored DUE row past its due date counts as OVERDUE),
-     * and {@code dueBefore} is an inclusive cutoff.
+     * and {@code dueBefore} is an inclusive cutoff. The dunning columns are the
+     * latest SENT action for the installment; CANCELLED history is ignored and
+     * correlation is scoped to the installment's own tenant.
      */
     public List<ReceivableRow> findReceivables(UUID tenantId, String status, LocalDate today,
                                                LocalDate dueBefore, int limit) {
@@ -158,7 +163,19 @@ public class BillingRepository {
                 SELECT i.id AS installment_id, p.id AS plan_id, p.plan_number,
                        pol.id AS policy_id, pol.policy_number, pol.insured_party_id,
                        i.installment_number, i.due_date, i.amount, p.currency,
-                       i.status, i.paid_at, i.payment_id
+                       i.status, i.paid_at, i.payment_id,
+                       (SELECT d.level
+                          FROM billing_dunning_action d
+                         WHERE d.tenant_id = i.tenant_id AND d.installment_id = i.id
+                           AND d.status = 'SENT'
+                         ORDER BY d.sent_at DESC, d.created_at DESC, d.id ASC
+                         LIMIT 1) AS last_dunning_level,
+                       (SELECT d.sent_at
+                          FROM billing_dunning_action d
+                         WHERE d.tenant_id = i.tenant_id AND d.installment_id = i.id
+                           AND d.status = 'SENT'
+                         ORDER BY d.sent_at DESC, d.created_at DESC, d.id ASC
+                         LIMIT 1) AS last_dunning_at
                   FROM policy_installment i
                   JOIN policy_billing_plan p ON p.id = i.plan_id
                   JOIN policy pol ON pol.id = p.policy_id
