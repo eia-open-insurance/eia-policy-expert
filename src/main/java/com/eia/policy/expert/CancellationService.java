@@ -1,5 +1,7 @@
 package com.eia.policy.expert;
 
+import com.eia.platform.libs.outbox.OutboxEvent;
+import com.eia.platform.libs.outbox.OutboxRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -16,7 +18,8 @@ import java.util.UUID;
  * return premium computed from the policy term (SPEC POL-08). Reinstatement
  * restores coverage only after an approval reference and documented premium
  * evidence, issues a REINSTATEMENT version, and closes the active cancellation
- * (SPEC POL-09).
+ * (SPEC POL-09). Both commands write their outbox events in the same
+ * transaction as the state change.</p>
  */
 @Service
 public class CancellationService {
@@ -27,6 +30,7 @@ public class CancellationService {
     private final VersionIssuer versionIssuer;
     private final EndorsementFactory endorsementFactory;
     private final CommandIdempotency idempotency;
+    private final OutboxRepository outbox;
 
     public CancellationService(PolicyRepository policyRepository,
                                MutationGuard guard,
@@ -34,7 +38,8 @@ public class CancellationService {
                                PolicyVersionService versionService,
                                VersionIssuer versionIssuer,
                                EndorsementFactory endorsementFactory,
-                               CommandIdempotency idempotency) {
+                               CommandIdempotency idempotency,
+                               OutboxRepository outbox) {
         this.policyRepository = policyRepository;
         this.guard = guard;
         this.cancellationRepository = cancellationRepository;
@@ -42,6 +47,7 @@ public class CancellationService {
         this.versionIssuer = versionIssuer;
         this.endorsementFactory = endorsementFactory;
         this.idempotency = idempotency;
+        this.outbox = outbox;
     }
 
     public ItemPage<PolicyCancellation> listCancellations(UUID tenantId, UUID policyId,
@@ -119,17 +125,24 @@ public class CancellationService {
                 request.effectiveDate(), description, premiumDelta, policy.premiumCurrency(),
                 "NONE", List.of(), request.reason(), request.approvedBy(), request.approvalRef(),
                 null, null, false);
-        versionIssuer.issue(policy, versionId, "CANCELLATION", versionDate, description,
-                premiumDelta, policy.premiumCurrency(), request.approvedBy());
+        PolicyVersion version = versionIssuer.issue(policy, versionId, "CANCELLATION", versionDate,
+                description, premiumDelta, policy.premiumCurrency(), request.approvedBy());
+        Instant now = Instant.now();
         PolicyCancellation cancellation = new PolicyCancellation(cancellationId, tenantId, policyId,
                 versionId, type, request.reason().trim(), request.effectiveDate(),
-                request.noticeDays() == null ? 0 : request.noticeDays(), Instant.now(),
+                request.noticeDays() == null ? 0 : request.noticeDays(), now,
                 amounts.termDays(), amounts.remainingDays(), amounts.proRataPct(),
                 amounts.earnedPremium(), amounts.returnPremium(), policy.premiumCurrency(),
-                request.approvalRef(), request.approvedBy(), "ACTIVE", Instant.now());
+                request.approvalRef(), request.approvedBy(), "ACTIVE", now);
         cancellationRepository.insertCancellation(cancellation);
-        policyRepository.updateStatus(tenantId, policyId, "CANCELLED", request.reason().trim(),
-                policy.version());
+        Policy updated = policyRepository.updateStatus(tenantId, policyId, "CANCELLED",
+                request.reason().trim(), policy.version());
+        outbox.insert(OutboxEvent.fromEnvelope(
+                PolicyEvents.cancelled(updated, cancellation, version, now)));
+        if (version != null) {
+            outbox.insert(OutboxEvent.fromEnvelope(
+                    PolicyEvents.versionIssued(updated, version, now)));
+        }
         return cancellation;
     }
 
@@ -147,22 +160,29 @@ public class CancellationService {
                 request.effectiveDate(), description, Money.of(request.premiumEvidenceAmount()),
                 policy.premiumCurrency(), "NONE", List.of(), request.reason(),
                 request.approvedBy(), request.approvalRef(), null, null, false);
-        versionIssuer.issue(policy, versionId, "REINSTATEMENT", versionDate, description,
-                Money.of(request.premiumEvidenceAmount()), policy.premiumCurrency(),
+        PolicyVersion version = versionIssuer.issue(policy, versionId, "REINSTATEMENT", versionDate,
+                description, Money.of(request.premiumEvidenceAmount()), policy.premiumCurrency(),
                 request.approvedBy());
+        Instant now = Instant.now();
         PolicyReinstatement reinstatement = new PolicyReinstatement(reinstatementId, tenantId,
                 policyId, cancellation.id(), versionId, request.effectiveDate(),
                 request.reason().trim(), request.approvalRef(), request.approvedBy(),
                 request.premiumEvidenceRef().trim(), Money.of(request.premiumEvidenceAmount()),
-                request.premiumEvidenceCurrency(), "APPROVED", Instant.now());
+                request.premiumEvidenceCurrency(), "APPROVED", now);
         cancellationRepository.insertReinstatement(reinstatement);
         int rows = cancellationRepository.markReinstated(tenantId, policyId, cancellation.id());
         if (rows == 0) {
             throw PolicyErrors.conflict("CONCURRENT_MODIFICATION", "cancellationId",
                     "The cancellation changed concurrently; reload and retry.");
         }
-        policyRepository.updateStatus(tenantId, policyId, "REINSTATED", request.reason().trim(),
-                policy.version());
+        Policy updated = policyRepository.updateStatus(tenantId, policyId, "REINSTATED",
+                request.reason().trim(), policy.version());
+        outbox.insert(OutboxEvent.fromEnvelope(
+                PolicyEvents.reinstated(updated, reinstatement, version, now)));
+        if (version != null) {
+            outbox.insert(OutboxEvent.fromEnvelope(
+                    PolicyEvents.versionIssued(updated, version, now)));
+        }
         return reinstatement;
     }
 

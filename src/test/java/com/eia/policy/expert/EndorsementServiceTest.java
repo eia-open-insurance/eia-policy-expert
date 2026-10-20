@@ -1,5 +1,6 @@
 package com.eia.policy.expert;
 
+import com.eia.platform.libs.outbox.OutboxRepository;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
@@ -45,6 +46,8 @@ class EndorsementServiceTest {
     private VersionIssuer versionIssuer;
     @Mock
     private EndorsementFactory endorsementFactory;
+    @Mock
+    private OutboxRepository outbox;
 
     @Test
     void refusesToEndorseAPolicyThatIsNotIssued() {
@@ -145,7 +148,7 @@ class EndorsementServiceTest {
     private EndorsementService service() {
         return new EndorsementService(policyRepository, guard, endorsementRepository, versionService,
                 versionRepository, versionIssuer, endorsementFactory,
-                new CommandIdempotency(policyRepository));
+                new CommandIdempotency(policyRepository), outbox);
     }
 
     private static CreateEndorsementRequest request(LocalDate effectiveDate, String backdateReason,

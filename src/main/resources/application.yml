@@ -14,9 +14,20 @@ spring:
   sql:
     init:
       mode: always
+  quartz:
+    auto-startup: ${eia.outbox.enabled:false}
+    job-store-type: memory
 management:
   endpoints:
     web:
       exposure:
         include: health,info
-
+eia:
+  outbox:
+    enabled: ${EIA_OUTBOX_ENABLED:false}
+    endpoint: ${EIA_OUTBOX_ENDPOINT:}
+    batch-size: ${EIA_OUTBOX_BATCH_SIZE:100}
+    max-attempts: ${EIA_OUTBOX_MAX_ATTEMPTS:12}
+    claim-lease: ${EIA_OUTBOX_CLAIM_LEASE:2m}
+    interval: ${EIA_OUTBOX_INTERVAL:2s}
+    signing-secret: ${EIA_OUTBOX_SIGNING_SECRET:}

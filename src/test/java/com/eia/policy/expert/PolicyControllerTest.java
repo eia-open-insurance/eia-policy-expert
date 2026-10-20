@@ -1,5 +1,6 @@
 package com.eia.policy.expert;
 
+import com.eia.platform.libs.outbox.OutboxRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -53,6 +54,9 @@ class PolicyControllerTest {
 
     @MockitoBean
     private PolicyVersionService versionService;
+
+    @MockitoBean
+    private OutboxRepository outbox;
 
     @Test
     void listsPoliciesWithDefaultPageEnvelope() throws Exception {

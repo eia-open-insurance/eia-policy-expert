@@ -39,6 +39,9 @@ contract structures from SPEC 11.2:
 - `policy_cancellation` and `policy_reinstatement`: notice, reason, effective
   date, pro-rata return premium, and a reinstatement gate that requires an
   approval and documented premium evidence.
+- `outbox_event`: canonical Policy events written in the same transaction as
+  each covered mutation (`created`, `updated`, `version-issued`, `endorsed`,
+  `cancelled`, `reinstated`), with conditional Quartz HTTP dispatch.
 
 Every second-slice mutation accepts an optional `If-Match` strong entity tag
 (the aggregate `version`), returns the new `ETag`, and accepts an optional

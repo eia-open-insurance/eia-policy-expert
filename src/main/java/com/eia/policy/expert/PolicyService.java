@@ -1,5 +1,7 @@
 package com.eia.policy.expert;
 
+import com.eia.platform.libs.outbox.OutboxEvent;
+import com.eia.platform.libs.outbox.OutboxRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DuplicateKeyException;
@@ -7,21 +9,30 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
+/**
+ * Policy writes. The state change and its outbox row are committed in one
+ * transaction (SPEC 7.5.1), so an event is never lost and a rollback leaves
+ * neither the policy mutation nor the event behind.
+ */
 @Service
 public class PolicyService {
     private static final Logger LOG = LoggerFactory.getLogger(PolicyService.class);
 
     private final PolicyRepository repository;
     private final PolicyVersionService versionService;
+    private final OutboxRepository outbox;
 
-    public PolicyService(PolicyRepository repository, PolicyVersionService versionService) {
+    public PolicyService(PolicyRepository repository, PolicyVersionService versionService,
+                         OutboxRepository outbox) {
         this.repository = repository;
         this.versionService = versionService;
+        this.outbox = outbox;
     }
 
     /** Compatibility read: all policies. New callers should use the page form. */
@@ -136,8 +147,16 @@ public class PolicyService {
 
         Policy updated = repository.updateStatus(tenantId, id, targetStatus, request.reason(),
                 expectedVersion);
+        PolicyVersion issuedVersion = null;
         if ("ISSUED".equals(targetStatus)) {
-            versionService.issuePolicyVersion(updated, null);
+            issuedVersion = versionService.issuePolicyVersion(updated, null);
+        }
+        Instant now = Instant.now();
+        outbox.insert(OutboxEvent.fromEnvelope(
+                PolicyEvents.updated(current, updated, request.reason(), now)));
+        if (issuedVersion != null) {
+            outbox.insert(OutboxEvent.fromEnvelope(
+                    PolicyEvents.versionIssued(updated, issuedVersion, now)));
         }
         return updated;
     }
@@ -145,6 +164,7 @@ public class PolicyService {
     private Policy createPolicyWithInitialVersion(CreatePolicyRequest request, UUID policyId) {
         Policy policy = createPolicy(request, policyId);
         versionService.createInitialVersion(policy, UUID.randomUUID());
+        outbox.insert(OutboxEvent.fromEnvelope(PolicyEvents.created(policy, Instant.now())));
         return policy;
     }
 

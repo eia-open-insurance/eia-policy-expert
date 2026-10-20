@@ -1,5 +1,6 @@
 package com.eia.policy.expert;
 
+import com.eia.platform.libs.outbox.OutboxRepository;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
@@ -41,6 +42,8 @@ class CancellationServiceTest {
     private VersionIssuer versionIssuer;
     @Mock
     private EndorsementFactory endorsementFactory;
+    @Mock
+    private OutboxRepository outbox;
 
     @Test
     void cancelsAProRataPolicyAndRecordsTheReturnPremium() {
@@ -183,7 +186,7 @@ class CancellationServiceTest {
     private CancellationService service() {
         return new CancellationService(policyRepository, guard, cancellationRepository,
                 versionService, versionIssuer, endorsementFactory,
-                new CommandIdempotency(policyRepository));
+                new CommandIdempotency(policyRepository), outbox);
     }
 
     private static PolicyCancellation cancellation() {

@@ -1,8 +1,11 @@
 package com.eia.policy.expert;
 
+import com.eia.platform.libs.outbox.OutboxEvent;
+import com.eia.platform.libs.outbox.OutboxRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Instant;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.UUID;
@@ -12,6 +15,8 @@ import java.util.UUID;
  * issues an immutable policy version, rejects a backdated change without a
  * reason and an approval (SPEC POL-07 follow-on rule), and cannot be posted
  * before the policy is issued.
+ *
+ * <p>The endorsement, its version and the outbox events commit together.</p>
  */
 @Service
 public class EndorsementService {
@@ -23,6 +28,7 @@ public class EndorsementService {
     private final VersionIssuer versionIssuer;
     private final EndorsementFactory endorsementFactory;
     private final CommandIdempotency idempotency;
+    private final OutboxRepository outbox;
 
     public EndorsementService(PolicyRepository policyRepository,
                               MutationGuard guard,
@@ -31,7 +37,8 @@ public class EndorsementService {
                               PolicyVersionRepository versionRepository,
                               VersionIssuer versionIssuer,
                               EndorsementFactory endorsementFactory,
-                              CommandIdempotency idempotency) {
+                              CommandIdempotency idempotency,
+                              OutboxRepository outbox) {
         this.policyRepository = policyRepository;
         this.guard = guard;
         this.endorsementRepository = endorsementRepository;
@@ -40,6 +47,7 @@ public class EndorsementService {
         this.versionIssuer = versionIssuer;
         this.endorsementFactory = endorsementFactory;
         this.idempotency = idempotency;
+        this.outbox = outbox;
     }
 
     public ItemPage<PolicyEndorsement> list(UUID tenantId, UUID policyId, int page, int size) {
@@ -104,6 +112,14 @@ public class EndorsementService {
                 request.description().trim(), Money.of(request.premiumDeltaAmount()),
                 request.premiumDeltaCurrency(), request.approvedBy());
         touch(policy);
+        Policy updated = requirePolicy(tenantId, policyId);
+        Instant now = Instant.now();
+        outbox.insert(OutboxEvent.fromEnvelope(
+                PolicyEvents.endorsed(updated, endorsement, version, now)));
+        if (version != null) {
+            outbox.insert(OutboxEvent.fromEnvelope(
+                    PolicyEvents.versionIssued(updated, version, now)));
+        }
         return new EndorsementOutcome(endorsement, version);
     }
 

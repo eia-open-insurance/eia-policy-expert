@@ -60,6 +60,23 @@ class SchemaContractTest {
     }
 
     @Test
+    void schemaMatchesThePlatformTransactionalOutbox() throws Exception {
+        String schema = schema();
+
+        assertThat(schema).contains("CREATE TABLE IF NOT EXISTS outbox_event");
+        assertThat(schema).contains("event_sequence BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE");
+        assertThat(schema).contains("payload JSONB NOT NULL");
+        assertThat(schema).contains("headers JSONB NOT NULL DEFAULT '{}'::jsonb");
+        assertThat(schema).contains("partition_key VARCHAR(128) NOT NULL");
+        assertThat(schema).contains(
+                "CONSTRAINT uq_outbox_event_aggregate_version");
+        assertThat(schema).contains(
+                "UNIQUE (aggregate_type, aggregate_id, aggregate_version, event_type)");
+        assertThat(schema).contains("ix_outbox_event_due");
+        assertThat(schema).contains("ix_outbox_event_partition");
+    }
+
+    @Test
     void schemaEnforcesLimitAndErosionInvariantsInTheDatabase() throws Exception {
         String schema = schema();
 
