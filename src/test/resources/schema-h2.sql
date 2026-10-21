@@ -55,6 +55,8 @@ CREATE TABLE IF NOT EXISTS policy_program (
     effective_from DATE NOT NULL,
     effective_to DATE NOT NULL,
     status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',
+    capacity_amount NUMERIC(19,4),
+    capacity_currency CHAR(3),
     lead_policy_id UUID,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL,
     CONSTRAINT uq_policy_program_number UNIQUE (tenant_id, program_number),
@@ -62,13 +64,35 @@ CREATE TABLE IF NOT EXISTS policy_program (
         'CAPTIVE', 'POOL', 'FRONTING', 'COINSURANCE', 'MASS_TORT'
     )),
     CONSTRAINT ck_policy_program_status CHECK (status IN ('ACTIVE', 'CLOSED')),
-    CONSTRAINT ck_policy_program_dates CHECK (effective_to >= effective_from)
+    CONSTRAINT ck_policy_program_dates CHECK (effective_to >= effective_from),
+    CONSTRAINT ck_policy_program_capacity
+        CHECK (capacity_amount IS NULL OR capacity_amount > 0),
+    CONSTRAINT ck_policy_program_capacity_currency
+        CHECK (capacity_currency IS NULL OR CHAR_LENGTH(TRIM(capacity_currency)) = 3),
+    CONSTRAINT ck_policy_program_capacity_pair
+        CHECK ((capacity_amount IS NULL AND capacity_currency IS NULL)
+            OR (capacity_amount IS NOT NULL AND capacity_currency IS NOT NULL))
 );
 
 CREATE INDEX IF NOT EXISTS idx_policy_program_tenant_created
     ON policy_program (tenant_id, created_at DESC, id);
 CREATE INDEX IF NOT EXISTS idx_policy_program_lead_policy
     ON policy_program (tenant_id, lead_policy_id);
+
+-- H2-compatible copy of the optional capacity columns and their idempotent
+-- migration/constraints.
+ALTER TABLE policy_program ADD COLUMN IF NOT EXISTS capacity_amount NUMERIC(19,4);
+ALTER TABLE policy_program ADD COLUMN IF NOT EXISTS capacity_currency CHAR(3);
+ALTER TABLE policy_program DROP CONSTRAINT IF EXISTS ck_policy_program_capacity;
+ALTER TABLE policy_program ADD CONSTRAINT ck_policy_program_capacity
+    CHECK (capacity_amount IS NULL OR capacity_amount > 0);
+ALTER TABLE policy_program DROP CONSTRAINT IF EXISTS ck_policy_program_capacity_currency;
+ALTER TABLE policy_program ADD CONSTRAINT ck_policy_program_capacity_currency
+    CHECK (capacity_currency IS NULL OR CHAR_LENGTH(TRIM(capacity_currency)) = 3);
+ALTER TABLE policy_program DROP CONSTRAINT IF EXISTS ck_policy_program_capacity_pair;
+ALTER TABLE policy_program ADD CONSTRAINT ck_policy_program_capacity_pair
+    CHECK ((capacity_amount IS NULL AND capacity_currency IS NULL)
+        OR (capacity_amount IS NOT NULL AND capacity_currency IS NOT NULL));
 
 ALTER TABLE policy ADD COLUMN IF NOT EXISTS program_id UUID;
 ALTER TABLE policy DROP CONSTRAINT IF EXISTS fk_policy_program;

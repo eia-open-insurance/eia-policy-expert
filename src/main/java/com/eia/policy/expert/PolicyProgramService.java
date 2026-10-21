@@ -58,18 +58,31 @@ public class PolicyProgramService {
         PolicyProgram program = new PolicyProgram(UUID.randomUUID(), tenantId,
                 programRepository.nextProgramNumber(), spec.name(), spec.programType(),
                 spec.effectiveFrom(), spec.effectiveTo(), ProgramRules.ACTIVE,
-                spec.leadPolicyId(), now);
+                spec.capacityAmount(), spec.capacityCurrency(), spec.leadPolicyId(), now);
         programRepository.insert(program);
         outbox.insert(OutboxEvent.fromEnvelope(PolicyEvents.programCreated(program, now)));
         return ProgramView.of(program);
     }
 
+    /**
+     * Lists the tenant's programs with their derived capacity usage. One grouped
+     * usage query serves the whole page, so the list never issues a query per
+     * program.
+     */
     public List<ProgramView> list(UUID tenantId) {
-        return programRepository.findAll(tenantId).stream().map(ProgramView::of).toList();
+        List<PolicyProgram> programs = programRepository.findAll(tenantId);
+        if (programs.isEmpty()) {
+            return List.of();
+        }
+        Map<UUID, ProgramUsage> usage = programRepository.findUsageByProgram(tenantId);
+        return programs.stream()
+                .map(program -> ProgramView.of(program, usage.get(program.id())))
+                .toList();
     }
 
     public ProgramView get(UUID tenantId, UUID programId) {
-        return ProgramView.of(requireProgram(tenantId, programId));
+        PolicyProgram program = requireProgram(tenantId, programId);
+        return ProgramView.of(program, programRepository.findUsage(tenantId, programId));
     }
 
     /**

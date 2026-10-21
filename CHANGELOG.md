@@ -87,6 +87,16 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   `policy.policy.program-assigned` (policy aggregate, `programId` set or null)
   outbox events written in the same transaction as the catalog row or policy
   assignment.
+- Optional program capacity: idempotent `policy_program.capacity_amount`
+  (`numeric(19,4)`) and `capacity_currency` (`char(3)`) columns with positive
+  amount, three-letter currency, and both-or-neither checks. Create accepts
+  `capacityAmount`/`capacityCurrency`, rejects non-positive amounts and bad
+  currencies, and stores the pair only when both are supplied.
+- Program reads now carry `capacityAmount`, `capacityCurrency`, `usedAmount`
+  (sum of `policy.limit_amount` for the tenant's assigned policies, zero when
+  none), `utilizationPct` (`usedAmount / capacityAmount * 100`, two decimals,
+  `null` without capacity), and `policyCount`; list uses one grouped usage
+  query, and get/create return the same projection.
 - Legal entity catalog slice: idempotent `legal_entity` table with a
   tenant-unique upper-case `code`, `INSURER`/`MGA`/`CAPTIVE`/`POOL`/`FRONTER`
   type vocabulary, a two-letter jurisdiction, optional regulator/license

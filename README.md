@@ -61,9 +61,10 @@ contract structures from SPEC 11.2:
   dates.
 - `policy_program`: the commercial program catalog (`CAPTIVE`, `POOL`,
   `FRONTING`, `COINSURANCE`, `MASS_TORT`) with a tenant-unique program number,
-  an inclusive effective range, ACTIVE/CLOSED status, and an optional lead
-  policy. `policy.program_id` is a nullable FK to the catalog, so a policy can be
-  assigned to or cleared from one program.
+  an inclusive effective range, ACTIVE/CLOSED status, an optional positive
+  `capacity_amount` (`numeric(19,4)`) with its three-letter `capacity_currency`,
+  and an optional lead policy. `policy.program_id` is a nullable FK to the
+  catalog, so a policy can be assigned to or cleared from one program.
 - `legal_entity`: the regulated carrier catalog (`INSURER`, `MGA`, `CAPTIVE`,
   `POOL`, `FRONTER`) with a tenant-unique upper-case `code`, name, two-letter
   jurisdiction, optional regulator and license number, and ACTIVE/INACTIVE
@@ -191,13 +192,21 @@ assignment command under `/api/v1/policies/{policyId}/program` (both keep the
 | `PATCH` | `/api/v1/policies/{policyId}/program` | Assign `{programId}` or clear with `{programId:null}`; bumps the policy version and returns the updated policy with its `ETag` |
 
 The create body is `{name, programType, effectiveFrom, effectiveTo,
-leadPolicyId?}`. `programType` is one of `CAPTIVE`, `POOL`, `FRONTING`,
-`COINSURANCE`, or `MASS_TORT` (case-insensitive, stored upper-case), and the
-effective range is inclusive, so a one-day program is valid while an end before
-the start is a `400 INVALID_PROGRAM_DATES`. The tenant comes from `?tenantId=` or
-`X-EIA-Tenant`; the route is fixed to the DIRECT book. Creating a program writes
-`policy.program.created` against the Program aggregate; assignment and clearing
-write `policy.policy.program-assigned` with `programId` set or `null` in the same
+leadPolicyId?, capacityAmount?, capacityCurrency?}`. `programType` is one of
+`CAPTIVE`, `POOL`, `FRONTING`, `COINSURANCE`, or `MASS_TORT` (case-insensitive,
+stored upper-case), and the effective range is inclusive, so a one-day program
+is valid while an end before the start is a `400 INVALID_PROGRAM_DATES`.
+Capacity is optional, but when supplied it must be a positive
+`numeric(19,4)` amount with a three-letter ISO 4217 currency; the two fields are
+both present or both absent (`400 INVALID_PROGRAM_CAPACITY` otherwise). The
+tenant comes from `?tenantId=` or `X-EIA-Tenant`; the route is fixed to the
+DIRECT book. Program reads carry the capacity plus the derived `usedAmount`
+(sum of `policy.limit_amount` for the tenant's assigned policies),
+`utilizationPct` (`usedAmount / capacityAmount * 100`, two decimals, `null`
+without capacity), and `policyCount`; a program without policies reports a zero
+used amount. Creating a program writes `policy.program.created` against the
+Program aggregate; assignment and clearing write
+`policy.policy.program-assigned` with `programId` set or `null` in the same
 transaction as the policy version bump. A program id from another tenant is a
 `404 PROGRAM_NOT_FOUND`.
 

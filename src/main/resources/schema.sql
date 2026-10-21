@@ -60,6 +60,8 @@ CREATE TABLE IF NOT EXISTS policy_program (
     effective_from DATE NOT NULL,
     effective_to DATE NOT NULL,
     status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',
+    capacity_amount NUMERIC(19,4),
+    capacity_currency CHAR(3),
     lead_policy_id UUID,
     created_at TIMESTAMPTZ NOT NULL,
     CONSTRAINT uq_policy_program_number UNIQUE (tenant_id, program_number),
@@ -67,13 +69,38 @@ CREATE TABLE IF NOT EXISTS policy_program (
         'CAPTIVE', 'POOL', 'FRONTING', 'COINSURANCE', 'MASS_TORT'
     )),
     CONSTRAINT ck_policy_program_status CHECK (status IN ('ACTIVE', 'CLOSED')),
-    CONSTRAINT ck_policy_program_dates CHECK (effective_to >= effective_from)
+    CONSTRAINT ck_policy_program_dates CHECK (effective_to >= effective_from),
+    CONSTRAINT ck_policy_program_capacity
+        CHECK (capacity_amount IS NULL OR capacity_amount > 0),
+    CONSTRAINT ck_policy_program_capacity_currency
+        CHECK (capacity_currency IS NULL OR CHAR_LENGTH(TRIM(capacity_currency)) = 3),
+    CONSTRAINT ck_policy_program_capacity_pair
+        CHECK ((capacity_amount IS NULL AND capacity_currency IS NULL)
+            OR (capacity_amount IS NOT NULL AND capacity_currency IS NOT NULL))
 );
 
 CREATE INDEX IF NOT EXISTS idx_policy_program_tenant_created
     ON policy_program (tenant_id, created_at DESC, id);
 CREATE INDEX IF NOT EXISTS idx_policy_program_lead_policy
     ON policy_program (tenant_id, lead_policy_id);
+
+-- Optional program capacity (SPEC 11.2.16). Capacity is a positive money
+-- amount that always carries its ISO 4217 currency, so the pair is either both
+-- present or both absent. The ALTERs are idempotent for already-migrated
+-- databases; PostgreSQL has no ADD CONSTRAINT IF NOT EXISTS, so each check is
+-- dropped and re-added on startup to keep its definition in one place.
+ALTER TABLE policy_program ADD COLUMN IF NOT EXISTS capacity_amount NUMERIC(19,4);
+ALTER TABLE policy_program ADD COLUMN IF NOT EXISTS capacity_currency CHAR(3);
+ALTER TABLE policy_program DROP CONSTRAINT IF EXISTS ck_policy_program_capacity;
+ALTER TABLE policy_program ADD CONSTRAINT ck_policy_program_capacity
+    CHECK (capacity_amount IS NULL OR capacity_amount > 0);
+ALTER TABLE policy_program DROP CONSTRAINT IF EXISTS ck_policy_program_capacity_currency;
+ALTER TABLE policy_program ADD CONSTRAINT ck_policy_program_capacity_currency
+    CHECK (capacity_currency IS NULL OR CHAR_LENGTH(TRIM(capacity_currency)) = 3);
+ALTER TABLE policy_program DROP CONSTRAINT IF EXISTS ck_policy_program_capacity_pair;
+ALTER TABLE policy_program ADD CONSTRAINT ck_policy_program_capacity_pair
+    CHECK ((capacity_amount IS NULL AND capacity_currency IS NULL)
+        OR (capacity_amount IS NOT NULL AND capacity_currency IS NOT NULL));
 
 -- Nullable policy-to-program link. The column is added with an idempotent ALTER
 -- so an already-migrated database picks it up. PostgreSQL has no

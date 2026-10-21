@@ -68,7 +68,75 @@ class PolicyProgramControllerTest {
                 .andExpect(jsonPath("$.status").value("ACTIVE"))
                 .andExpect(jsonPath("$.leadPolicyId").value(LEAD_POLICY_ID.toString()))
                 .andExpect(jsonPath("$.createdAt").value("2026-10-19T12:00:00Z"))
+                .andExpect(jsonPath("$.capacityAmount").value(nullValue()))
+                .andExpect(jsonPath("$.capacityCurrency").value(nullValue()))
+                .andExpect(jsonPath("$.usedAmount").value("0.0000"))
+                .andExpect(jsonPath("$.utilizationPct").value(nullValue()))
+                .andExpect(jsonPath("$.policyCount").value(0))
                 .andExpect(jsonPath("$.tenantId").doesNotExist());
+    }
+
+    @Test
+    void createsAProgramWithCapacityAndDerivedUsage() throws Exception {
+        when(service.create(eq(TENANT), any(CreateProgramRequest.class)))
+                .thenReturn(view(LEAD_POLICY_ID, new BigDecimal("2000000.0000"), "USD",
+                        new BigDecimal("750000.0000"), 2));
+
+        mvc.perform(post("/api/v1/programs")
+                        .param("tenantId", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"name":"Capacity Program","programType":"CAPTIVE",
+                                 "effectiveFrom":"2026-01-01","effectiveTo":"2027-01-01",
+                                 "capacityAmount":2000000.0000,"capacityCurrency":"USD"}
+                                """))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.capacityAmount").value("2000000.0000"))
+                .andExpect(jsonPath("$.capacityCurrency").value("USD"))
+                .andExpect(jsonPath("$.usedAmount").value("750000.0000"))
+                .andExpect(jsonPath("$.utilizationPct").value("37.50"))
+                .andExpect(jsonPath("$.policyCount").value(2));
+
+        ArgumentCaptor<CreateProgramRequest> captor =
+                ArgumentCaptor.forClass(CreateProgramRequest.class);
+        verify(service).create(eq(TENANT), captor.capture());
+        assertThat(captor.getValue().capacityAmount())
+                .isEqualByComparingTo("2000000.0000");
+        assertThat(captor.getValue().capacityCurrency()).isEqualTo("USD");
+    }
+
+    @Test
+    void rejectsANonPositiveCapacityAmount() throws Exception {
+        mvc.perform(post("/api/v1/programs")
+                        .param("tenantId", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"name":"Capacity Program","programType":"CAPTIVE",
+                                 "effectiveFrom":"2026-01-01","effectiveTo":"2027-01-01",
+                                 "capacityAmount":-1,"capacityCurrency":"USD"}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.errors[0].field").value("capacityAmount"));
+
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void rejectsABadCapacityCurrency() throws Exception {
+        mvc.perform(post("/api/v1/programs")
+                        .param("tenantId", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"name":"Capacity Program","programType":"CAPTIVE",
+                                 "effectiveFrom":"2026-01-01","effectiveTo":"2027-01-01",
+                                 "capacityAmount":2000000,"capacityCurrency":"US"}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.errors[0].field").value("capacityCurrency"));
+
+        verifyNoInteractions(service);
     }
 
     @Test
@@ -223,8 +291,16 @@ class PolicyProgramControllerTest {
     }
 
     private static ProgramView view(UUID leadPolicyId) {
+        return view(leadPolicyId, null, null, new BigDecimal("0.0000"), 0);
+    }
+
+    private static ProgramView view(UUID leadPolicyId, BigDecimal capacityAmount,
+                                    String capacityCurrency, BigDecimal usedAmount,
+                                    long policyCount) {
         return new ProgramView(PROGRAM_ID, "PRG-2026-0000001", "Captive 2026", "CAPTIVE",
-                FROM, TO, "ACTIVE", leadPolicyId, CREATED);
+                FROM, TO, "ACTIVE", capacityAmount, capacityCurrency, leadPolicyId, CREATED,
+                usedAmount, ProgramRules.utilizationPct(usedAmount, capacityAmount),
+                policyCount);
     }
 
     private static Policy policy(UUID programId, int version) {

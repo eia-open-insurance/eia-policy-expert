@@ -8,18 +8,25 @@ import java.sql.Timestamp;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 /**
  * Persistence for the commercial program catalog. Every read is tenant-scoped,
  * so a program id from another tenant is indistinguishable from a missing one.
+ *
+ * <p>The capacity usage read model counts the tenant's policies assigned to a
+ * program and sums their {@code limit_amount}; the aggregate is derived from
+ * the policy facts on every read rather than stored on the program row.</p>
  */
 @Repository
 public class PolicyProgramRepository {
     private static final String SELECT_COLUMNS = """
             SELECT id, tenant_id, program_number, name, program_type, effective_from,
-                   effective_to, status, lead_policy_id, created_at
+                   effective_to, status, capacity_amount, capacity_currency, lead_policy_id,
+                   created_at
               FROM policy_program
             """;
 
@@ -32,6 +39,8 @@ public class PolicyProgramRepository {
             rs.getObject("effective_from", LocalDate.class),
             rs.getObject("effective_to", LocalDate.class),
             rs.getString("status"),
+            rs.getBigDecimal("capacity_amount"),
+            rs.getString("capacity_currency"),
             rs.getObject("lead_policy_id", UUID.class),
             rs.getTimestamp("created_at").toInstant()
     );
@@ -63,12 +72,45 @@ public class PolicyProgramRepository {
         jdbc.update("""
                 INSERT INTO policy_program
                        (id, tenant_id, program_number, name, program_type, effective_from,
-                        effective_to, status, lead_policy_id, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        effective_to, status, capacity_amount, capacity_currency, lead_policy_id,
+                        created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, program.id(), program.tenantId(), program.programNumber(), program.name(),
                 program.programType(), program.effectiveFrom(), program.effectiveTo(),
-                program.status(), program.leadPolicyId(),
-                Timestamp.from(program.createdAt()));
+                program.status(), program.capacityAmount(), program.capacityCurrency(),
+                program.leadPolicyId(), Timestamp.from(program.createdAt()));
+    }
+
+    /**
+     * Number of policies assigned to one program and the sum of their limits.
+     * The aggregate always returns one row, so a program with no policies
+     * reports a zero count and a zero amount.
+     */
+    public ProgramUsage findUsage(UUID tenantId, UUID programId) {
+        return jdbc.queryForObject("""
+                SELECT COUNT(*) AS policy_count, COALESCE(SUM(limit_amount), 0) AS used_amount
+                  FROM policy
+                 WHERE tenant_id = ? AND program_id = ?
+                """, (rs, rowNum) -> new ProgramUsage(rs.getLong("policy_count"),
+                        rs.getBigDecimal("used_amount")), tenantId, programId);
+    }
+
+    /**
+     * Usage for every program in the tenant in one grouped query, keyed by
+     * program id. Programs without policies are simply absent from the map.
+     */
+    public Map<UUID, ProgramUsage> findUsageByProgram(UUID tenantId) {
+        return jdbc.query("""
+                SELECT program_id, COUNT(*) AS policy_count, SUM(limit_amount) AS used_amount
+                  FROM policy
+                 WHERE tenant_id = ? AND program_id IS NOT NULL
+                 GROUP BY program_id
+                """, (rs, rowNum) -> Map.entry(
+                        rs.getObject("program_id", UUID.class),
+                        new ProgramUsage(rs.getLong("policy_count"),
+                                rs.getBigDecimal("used_amount"))),
+                tenantId).stream()
+                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
     }
 
     /**

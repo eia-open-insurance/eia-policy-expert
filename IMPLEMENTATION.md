@@ -10,8 +10,9 @@ predecessor lineage and copied terms), a billing slice (billing plan,
 installment schedule, settlement, dunning actions, and the tenant-wide
 receivables read model), a mass tort profile slice (one profile per policy
 with tort, trigger, allocation, coverage block, and DRAFT/COMPLETE gating), a
-commercial program catalog slice (tenant-unique programs plus the nullable
-`policy.program_id` assignment), a legal entity catalog slice (tenant-unique
+commercial program catalog slice (tenant-unique programs, optional positive
+capacity with its currency, derived used/utilization/policy-count reads, plus
+the nullable `policy.program_id` assignment), a legal entity catalog slice (tenant-unique
 upper-case codes plus the nullable `policy.legal_entity_id` assignment), and a
 credit note slice (DRAFT/ISSUED/APPLIED/CANCELLED billing adjustments with
 per-policy numbering and application to open installments) from SPEC 11.2.
@@ -35,7 +36,7 @@ outbox (SPEC 7.5.1) in the same database transaction as the aggregate write.
 | `BillingReceivablesController` / `ReceivableRow` / `InstallmentReceivable` | Tenant-wide open-premium receivables read model with derived overdue status, outstanding-after-credit amounts, and latest-SENT dunning enrichment |
 | `CreditNoteController` / `CreditNoteService` / `CreditNoteRepository` | Policy credit notes, per-policy numbering, the DRAFT/ISSUED/APPLIED/CANCELLED lifecycle, and application to an open installment |
 | `MassTortProfileController` / `MassTortProfileService` / `MassTortProfileRepository` | One-profile-per-policy upsert, COMPLETE gating, and the profile outbox event |
-| `PolicyProgramController` / `PolicyProgramService` / `PolicyProgramRepository` | Commercial program catalog, policy assignment/clear, and the program outbox events |
+| `PolicyProgramController` / `PolicyProgramService` / `PolicyProgramRepository` | Commercial program catalog, optional capacity with the derived usage projection, policy assignment/clear, and the program outbox events |
 | `LegalEntityController` / `LegalEntityService` / `LegalEntityRepository` | Legal entity catalog, policy assignment/clear, and the legal entity outbox events |
 | `PolicyRules`, `VersionTimeline`, `CoverageRules`, `CancellationRules`, `CancellationMath`, `PartyRules`, `EndorsementRules`, `BillingRules`, `CreditNoteRules`, `MassTortProfileRules`, `ProgramRules`, `LegalEntityRules` | Pure invariants with focused unit tests |
 | `PolicyVersionHasher`, `VersionIssuer` | Canonical version snapshot hash and issuance |
@@ -215,9 +216,14 @@ The live smoke is opt-in and requires PostgreSQL.
   exposures, premium audit, and the claim/cession/reinsurance projections are
   not implemented. The profile itself is exposed, but the separate
   `policy_coverage_block` table is still a gap.
-- The program catalog is create/list/get plus policy assignment only. Program
-  lifecycle transitions (CLOSED), program edits, and lead-policy integrity are
-  not exposed: `lead_policy_id` is stored as an opaque UUID without a FK.
+- The program catalog is create/list/get plus policy assignment only. Capacity
+  is a single optional amount/currency pair on the program; the SPEC 11.2.16
+  `program_version`/`program_capacity` provider shares, fronting/coinsurance
+  structures, and capacity-share sum rule are not modelled. Utilization is
+  derived from assigned policy limits, not from capacity-provider shares.
+  Program lifecycle transitions (CLOSED), program edits, and lead-policy
+  integrity are not exposed: `lead_policy_id` is stored as an opaque UUID
+  without a FK.
 - The legal entity catalog is create/list/get plus policy assignment only.
   Entity edits, ACTIVE/INACTIVE retirement, legal-entity relationships,
   organization units, and the SPEC 10.11 NAIC/LEI/SAP company-code and

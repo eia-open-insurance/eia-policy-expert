@@ -139,6 +139,174 @@ class PolicyProgramIntegrationTest {
     }
 
     @Test
+    void createsAProgramWithAndWithoutCapacity() throws Exception {
+        mvc.perform(post("/api/v1/programs")
+                        .param("tenantId", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"name":"No Capacity Program","programType":"POOL",
+                                 "effectiveFrom":"2026-01-01","effectiveTo":"2027-01-01"}
+                                """))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.capacityAmount").value(nullValue()))
+                .andExpect(jsonPath("$.capacityCurrency").value(nullValue()))
+                .andExpect(jsonPath("$.usedAmount").value("0.0000"))
+                .andExpect(jsonPath("$.utilizationPct").value(nullValue()))
+                .andExpect(jsonPath("$.policyCount").value(0));
+
+        mvc.perform(post("/api/v1/programs")
+                        .param("tenantId", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"name":"Capacity Program","programType":"CAPTIVE",
+                                 "effectiveFrom":"2026-01-01","effectiveTo":"2027-01-01",
+                                 "capacityAmount":2000000.0000,"capacityCurrency":"USD"}
+                                """))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.capacityAmount").value("2000000.0000"))
+                .andExpect(jsonPath("$.capacityCurrency").value("USD"))
+                .andExpect(jsonPath("$.usedAmount").value("0.0000"))
+                .andExpect(jsonPath("$.utilizationPct").value("0.00"))
+                .andExpect(jsonPath("$.policyCount").value(0));
+    }
+
+    @Test
+    void computesCapacityUsageFromAssignedPolicies() throws Exception {
+        UUID programId = createProgram(TENANT, "Capacity Program", "CAPTIVE", FROM, TO, null,
+                new BigDecimal("2000000.00"), "USD");
+        Policy first = createPolicy(TENANT, "POL-CAP-0001", new BigDecimal("500000.00"));
+        Policy second = createPolicy(TENANT, "POL-CAP-0002", new BigDecimal("250000.00"));
+        createPolicy(TENANT, "POL-CAP-UNASSIGNED", new BigDecimal("999999.00"));
+        assign(first.id(), programId);
+        assign(second.id(), programId);
+
+        mvc.perform(get("/api/v1/programs/{id}", programId)
+                        .param("tenantId", TENANT.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.capacityAmount").value("2000000.0000"))
+                .andExpect(jsonPath("$.capacityCurrency").value("USD"))
+                .andExpect(jsonPath("$.usedAmount").value("750000.0000"))
+                .andExpect(jsonPath("$.utilizationPct").value("37.50"))
+                .andExpect(jsonPath("$.policyCount").value(2));
+
+        mvc.perform(get("/api/v1/programs").param("tenantId", TENANT.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].programId").value(programId.toString()))
+                .andExpect(jsonPath("$[0].usedAmount").value("750000.0000"))
+                .andExpect(jsonPath("$[0].utilizationPct").value("37.50"))
+                .andExpect(jsonPath("$[0].policyCount").value(2));
+    }
+
+    @Test
+    void capacityUsageIsTenantScoped() throws Exception {
+        UUID programId = createProgram(TENANT, "Tenant Capacity Program", "FRONTING", FROM, TO,
+                null, new BigDecimal("1000000.00"), "USD");
+        Policy tenantPolicy = createPolicy(TENANT, "POL-CAP-TENANT",
+                new BigDecimal("250000.00"));
+        assign(tenantPolicy.id(), programId);
+        Policy otherPolicy = createPolicy(OTHER_TENANT, "POL-CAP-OTHER",
+                new BigDecimal("900000.00"));
+        // The assignment API refuses a foreign program, so link the foreign
+        // policy directly to prove the usage queries filter by tenant.
+        jdbc.update("UPDATE policy SET program_id = ? WHERE tenant_id = ? AND id = ?",
+                programId, OTHER_TENANT, otherPolicy.id());
+
+        mvc.perform(get("/api/v1/programs/{id}", programId)
+                        .param("tenantId", TENANT.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.usedAmount").value("250000.0000"))
+                .andExpect(jsonPath("$.utilizationPct").value("25.00"))
+                .andExpect(jsonPath("$.policyCount").value(1));
+
+        mvc.perform(get("/api/v1/programs/{id}", programId)
+                        .param("tenantId", OTHER_TENANT.toString()))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value("PROGRAM_NOT_FOUND"));
+
+        mvc.perform(get("/api/v1/programs").param("tenantId", OTHER_TENANT.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$").isEmpty());
+    }
+
+    @Test
+    void validatesCapacityAmountAndCurrency() throws Exception {
+        mvc.perform(post("/api/v1/programs")
+                        .param("tenantId", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"name":"Zero Capacity","programType":"CAPTIVE",
+                                 "effectiveFrom":"2026-01-01","effectiveTo":"2027-01-01",
+                                 "capacityAmount":0,"capacityCurrency":"USD"}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.errors[0].field").value("capacityAmount"));
+
+        mvc.perform(post("/api/v1/programs")
+                        .param("tenantId", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"name":"Negative Capacity","programType":"CAPTIVE",
+                                 "effectiveFrom":"2026-01-01","effectiveTo":"2027-01-01",
+                                 "capacityAmount":-1,"capacityCurrency":"USD"}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.errors[0].field").value("capacityAmount"));
+
+        mvc.perform(post("/api/v1/programs")
+                        .param("tenantId", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"name":"Bad Currency","programType":"CAPTIVE",
+                                 "effectiveFrom":"2026-01-01","effectiveTo":"2027-01-01",
+                                 "capacityAmount":1000000,"capacityCurrency":"US"}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.errors[0].field").value("capacityCurrency"));
+
+        mvc.perform(post("/api/v1/programs")
+                        .param("tenantId", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"name":"Lowercase Currency","programType":"CAPTIVE",
+                                 "effectiveFrom":"2026-01-01","effectiveTo":"2027-01-01",
+                                 "capacityAmount":1000000,"capacityCurrency":"usd"}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.errors[0].field").value("capacityCurrency"));
+
+        mvc.perform(post("/api/v1/programs")
+                        .param("tenantId", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"name":"Amount Only","programType":"CAPTIVE",
+                                 "effectiveFrom":"2026-01-01","effectiveTo":"2027-01-01",
+                                 "capacityAmount":1000000}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_PROGRAM_CAPACITY"))
+                .andExpect(jsonPath("$.errors[0].field").value("capacityCurrency"));
+
+        mvc.perform(post("/api/v1/programs")
+                        .param("tenantId", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"name":"Currency Only","programType":"CAPTIVE",
+                                 "effectiveFrom":"2026-01-01","effectiveTo":"2027-01-01",
+                                 "capacityCurrency":"USD"}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_PROGRAM_CAPACITY"))
+                .andExpect(jsonPath("$.errors[0].field").value("capacityAmount"));
+
+        assertThat(count("policy_program")).isZero();
+        assertThat(count("outbox_event")).isZero();
+    }
+
+    @Test
     void writesProgramCreatedAndProgramAssignedEventsInTheSameTransaction() throws Exception {
         Policy policy = createPolicy(TENANT, "POL-PRG-0002");
         UUID programId = createProgram(TENANT, "Mass Tort Program", "MASS_TORT", FROM, TO,
@@ -293,10 +461,21 @@ class PolicyProgramIntegrationTest {
     private UUID createProgram(UUID tenantId, String name, String programType,
                                LocalDate effectiveFrom, LocalDate effectiveTo,
                                UUID leadPolicyId) throws Exception {
+        return createProgram(tenantId, name, programType, effectiveFrom, effectiveTo,
+                leadPolicyId, null, null);
+    }
+
+    private UUID createProgram(UUID tenantId, String name, String programType,
+                               LocalDate effectiveFrom, LocalDate effectiveTo,
+                               UUID leadPolicyId, BigDecimal capacityAmount,
+                               String capacityCurrency) throws Exception {
         String lead = leadPolicyId == null ? "" : ",\"leadPolicyId\":\"" + leadPolicyId + "\"";
+        String capacity = capacityAmount == null ? ""
+                : ",\"capacityAmount\":" + capacityAmount.toPlainString()
+                        + ",\"capacityCurrency\":\"" + capacityCurrency + "\"";
         String body = "{\"name\":\"" + name + "\",\"programType\":\"" + programType
                 + "\",\"effectiveFrom\":\"" + effectiveFrom + "\",\"effectiveTo\":\""
-                + effectiveTo + "\"" + lead + "}";
+                + effectiveTo + "\"" + lead + capacity + "}";
         MvcResult result = mvc.perform(post("/api/v1/programs")
                         .param("tenantId", tenantId.toString())
                         .contentType(MediaType.APPLICATION_JSON)
@@ -326,9 +505,13 @@ class PolicyProgramIntegrationTest {
     }
 
     private Policy createPolicy(UUID tenantId, String policyNumber) {
+        return createPolicy(tenantId, policyNumber, new BigDecimal("5000000.00"));
+    }
+
+    private Policy createPolicy(UUID tenantId, String policyNumber, BigDecimal limitAmount) {
         return policyService.create(new CreatePolicyRequest(tenantId, policyNumber, "CGL", PARTY,
                 null, FROM, TO, new BigDecimal("120000.00"), "USD",
-                new BigDecimal("5000000.00"), "USD"));
+                limitAmount, "USD"));
     }
 
     private int count(String table) {

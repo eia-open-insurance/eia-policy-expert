@@ -15,6 +15,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -73,6 +74,11 @@ class PolicyProgramServiceTest {
         assertThat(view.status()).isEqualTo("ACTIVE");
         assertThat(view.leadPolicyId()).isEqualTo(LEAD_POLICY_ID);
         assertThat(view.createdAt()).isEqualTo(NOW);
+        assertThat(view.capacityAmount()).isNull();
+        assertThat(view.capacityCurrency()).isNull();
+        assertThat(view.usedAmount()).isEqualByComparingTo("0.0000");
+        assertThat(view.utilizationPct()).isNull();
+        assertThat(view.policyCount()).isZero();
 
         ArgumentCaptor<OutboxEvent> captor = ArgumentCaptor.forClass(OutboxEvent.class);
         verify(outbox).insert(captor.capture());
@@ -95,6 +101,31 @@ class PolicyProgramServiceTest {
     }
 
     @Test
+    void createsAProgramWithCapacityAndZeroUsage() {
+        when(programRepository.nextProgramNumber()).thenReturn("PRG-2026-0000002");
+
+        ProgramView view = service().create(TENANT, new CreateProgramRequest(
+                "Capacity Program", "CAPTIVE", FROM, TO, LEAD_POLICY_ID,
+                new BigDecimal("2000000.0000"), "USD"));
+
+        assertThat(view.capacityAmount()).isEqualByComparingTo("2000000.0000");
+        assertThat(view.capacityCurrency()).isEqualTo("USD");
+        assertThat(view.usedAmount()).isEqualByComparingTo("0.0000");
+        assertThat(view.utilizationPct()).isEqualByComparingTo("0.00");
+        assertThat(view.policyCount()).isZero();
+
+        ArgumentCaptor<PolicyProgram> inserted = ArgumentCaptor.forClass(PolicyProgram.class);
+        verify(programRepository).insert(inserted.capture());
+        assertThat(inserted.getValue().capacityAmount())
+                .isEqualByComparingTo("2000000.0000");
+        assertThat(inserted.getValue().capacityCurrency()).isEqualTo("USD");
+
+        ArgumentCaptor<OutboxEvent> event = ArgumentCaptor.forClass(OutboxEvent.class);
+        verify(outbox).insert(event.capture());
+        assertThat(event.getValue().eventType()).isEqualTo("policy.program.created");
+    }
+
+    @Test
     void invalidCreateDoesNotConsumeAProgramNumberOrWriteAnEvent() {
         assertThatThrownBy(() -> service().create(TENANT,
                 new CreateProgramRequest("Program", "SELF_INSURED", FROM, TO, null)))
@@ -107,23 +138,88 @@ class PolicyProgramServiceTest {
     }
 
     @Test
+    void invalidCapacityDoesNotConsumeAProgramNumberOrWriteAnEvent() {
+        assertThatThrownBy(() -> service().create(TENANT, new CreateProgramRequest(
+                "Program", "CAPTIVE", FROM, TO, null, new BigDecimal("-1"), "USD")))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> assertThat(((ApiException) ex).code())
+                        .isEqualTo("INVALID_PROGRAM_CAPACITY"));
+
+        verify(programRepository, never()).nextProgramNumber();
+        verifyNoInteractions(outbox);
+    }
+
+    @Test
     void listsOnlyTheRequestedTenant() {
         when(programRepository.findAll(TENANT)).thenReturn(List.of(program()));
+        when(programRepository.findUsageByProgram(TENANT)).thenReturn(Map.of());
 
         assertThat(service().list(TENANT))
                 .singleElement()
                 .satisfies(view -> {
                     assertThat(view.programId()).isEqualTo(PROGRAM_ID);
                     assertThat(view.programNumber()).isEqualTo("PRG-2026-0000001");
+                    assertThat(view.usedAmount()).isEqualByComparingTo("0.0000");
+                    assertThat(view.utilizationPct()).isNull();
+                    assertThat(view.policyCount()).isZero();
                 });
         verify(programRepository).findAll(TENANT);
+        verify(programRepository).findUsageByProgram(TENANT);
+    }
+
+    @Test
+    void listAddsCapacityUsage() {
+        when(programRepository.findAll(TENANT))
+                .thenReturn(List.of(program(new BigDecimal("2000000.0000"), "USD")));
+        when(programRepository.findUsageByProgram(TENANT)).thenReturn(Map.of(PROGRAM_ID,
+                new ProgramUsage(2, new BigDecimal("500000.0000"))));
+
+        assertThat(service().list(TENANT))
+                .singleElement()
+                .satisfies(view -> {
+                    assertThat(view.capacityAmount()).isEqualByComparingTo("2000000.0000");
+                    assertThat(view.capacityCurrency()).isEqualTo("USD");
+                    assertThat(view.usedAmount()).isEqualByComparingTo("500000.0000");
+                    assertThat(view.utilizationPct()).isEqualByComparingTo("25.00");
+                    assertThat(view.policyCount()).isEqualTo(2);
+                });
     }
 
     @Test
     void getsAProgramByTenantAndId() {
         when(programRepository.findById(TENANT, PROGRAM_ID)).thenReturn(Optional.of(program()));
+        when(programRepository.findUsage(TENANT, PROGRAM_ID))
+                .thenReturn(new ProgramUsage(0, BigDecimal.ZERO));
 
         assertThat(service().get(TENANT, PROGRAM_ID).programId()).isEqualTo(PROGRAM_ID);
+        verify(programRepository).findUsage(TENANT, PROGRAM_ID);
+    }
+
+    @Test
+    void getComputesCapacityUsage() {
+        when(programRepository.findById(TENANT, PROGRAM_ID))
+                .thenReturn(Optional.of(program(new BigDecimal("2000000.0000"), "USD")));
+        when(programRepository.findUsage(TENANT, PROGRAM_ID))
+                .thenReturn(new ProgramUsage(3, new BigDecimal("750000.0000")));
+
+        ProgramView view = service().get(TENANT, PROGRAM_ID);
+
+        assertThat(view.usedAmount()).isEqualByComparingTo("750000.0000");
+        assertThat(view.utilizationPct()).isEqualByComparingTo("37.50");
+        assertThat(view.policyCount()).isEqualTo(3);
+    }
+
+    @Test
+    void usageOnAProgramWithoutCapacityHasNoUtilization() {
+        when(programRepository.findById(TENANT, PROGRAM_ID)).thenReturn(Optional.of(program()));
+        when(programRepository.findUsage(TENANT, PROGRAM_ID))
+                .thenReturn(new ProgramUsage(1, new BigDecimal("500000.0000")));
+
+        ProgramView view = service().get(TENANT, PROGRAM_ID);
+
+        assertThat(view.usedAmount()).isEqualByComparingTo("500000.0000");
+        assertThat(view.utilizationPct()).isNull();
+        assertThat(view.policyCount()).isEqualTo(1);
     }
 
     @Test
@@ -137,6 +233,8 @@ class PolicyProgramServiceTest {
                     assertThat(api.status()).isEqualTo(HttpStatus.NOT_FOUND);
                     assertThat(api.code()).isEqualTo("PROGRAM_NOT_FOUND");
                 });
+
+        verify(programRepository, never()).findUsage(any(), any());
     }
 
     @Test
@@ -250,8 +348,13 @@ class PolicyProgramServiceTest {
     }
 
     private static PolicyProgram program() {
+        return program(null, null);
+    }
+
+    private static PolicyProgram program(BigDecimal capacityAmount, String capacityCurrency) {
         return new PolicyProgram(PROGRAM_ID, TENANT, "PRG-2026-0000001", "Captive 2026",
-                "CAPTIVE", FROM, TO, "ACTIVE", LEAD_POLICY_ID, CREATED);
+                "CAPTIVE", FROM, TO, "ACTIVE", capacityAmount, capacityCurrency,
+                LEAD_POLICY_ID, CREATED);
     }
 
     private static Policy policy(UUID programId, int version) {
