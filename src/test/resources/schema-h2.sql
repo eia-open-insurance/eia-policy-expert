@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS policy (
     limit_currency CHAR(3) NOT NULL,
     renewed_from_policy_id UUID,
     program_id UUID,
+    legal_entity_id UUID,
     version INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL,
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
@@ -75,6 +76,39 @@ ALTER TABLE policy ADD CONSTRAINT fk_policy_program
     FOREIGN KEY (program_id) REFERENCES policy_program (id);
 
 CREATE INDEX IF NOT EXISTS idx_policy_program ON policy (tenant_id, program_id);
+
+-- H2-compatible copy of the legal entity catalog. The CHECK constraints mirror
+-- the PostgreSQL DDL; the FK on policy is added after both tables exist.
+CREATE TABLE IF NOT EXISTS legal_entity (
+    id UUID PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    code VARCHAR(32) NOT NULL,
+    name VARCHAR(200) NOT NULL,
+    entity_type VARCHAR(32) NOT NULL,
+    jurisdiction CHAR(2) NOT NULL,
+    regulator VARCHAR(120),
+    license_number VARCHAR(80),
+    status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    CONSTRAINT uq_legal_entity_code UNIQUE (tenant_id, code),
+    CONSTRAINT ck_legal_entity_type CHECK (entity_type IN (
+        'INSURER', 'MGA', 'CAPTIVE', 'POOL', 'FRONTER'
+    )),
+    CONSTRAINT ck_legal_entity_status CHECK (status IN ('ACTIVE', 'INACTIVE')),
+    CONSTRAINT ck_legal_entity_jurisdiction
+        CHECK (CHAR_LENGTH(jurisdiction) = 2)
+);
+
+CREATE INDEX IF NOT EXISTS idx_legal_entity_tenant_created
+    ON legal_entity (tenant_id, created_at DESC, id);
+
+ALTER TABLE policy ADD COLUMN IF NOT EXISTS legal_entity_id UUID;
+ALTER TABLE policy DROP CONSTRAINT IF EXISTS fk_policy_legal_entity;
+ALTER TABLE policy ADD CONSTRAINT fk_policy_legal_entity
+    FOREIGN KEY (legal_entity_id) REFERENCES legal_entity (id);
+
+CREATE INDEX IF NOT EXISTS idx_policy_legal_entity
+    ON policy (tenant_id, legal_entity_id);
 
 CREATE TABLE IF NOT EXISTS policy_idempotency (
     tenant_id UUID NOT NULL,

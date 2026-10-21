@@ -87,6 +87,24 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   `policy.policy.program-assigned` (policy aggregate, `programId` set or null)
   outbox events written in the same transaction as the catalog row or policy
   assignment.
+- Legal entity catalog slice: idempotent `legal_entity` table with a
+  tenant-unique upper-case `code`, `INSURER`/`MGA`/`CAPTIVE`/`POOL`/`FRONTER`
+  type vocabulary, a two-letter jurisdiction, optional regulator/license
+  fields, and `ACTIVE`/`INACTIVE` status.
+- Nullable `policy.legal_entity_id` FK with an idempotent `ALTER`, a
+  startup-safe FK redefinition, and `(tenant_id, legal_entity_id)` index; the
+  policy API projection now carries `legalEntityId` on list, get, and mutation
+  responses.
+- `POST`/`GET /api/v1/legal-entities` and `GET /api/v1/legal-entities/{id}`
+  plus `PATCH /api/v1/policies/{policyId}/legal-entity` (each also under
+  `/internal/v1`) with tenant-header/query scoping and the DIRECT-book gate. A
+  null `legalEntityId` clears the policy link, a foreign legal entity is `404
+  LEGAL_ENTITY_NOT_FOUND`, and assignment/clear bumps the policy version and
+  returns the new `ETag`.
+- `policy.legal-entity.created` (LegalEntity aggregate) and
+  `policy.policy.legal-entity-assigned` (policy aggregate, `legalEntityId` set
+  or null) outbox events written in the same transaction as the catalog row or
+  policy assignment.
 - Policy credit note slice: idempotent `policy_credit_note` table with a
   positive `numeric(19,4)` amount in the policy currency, an optional
   500-character reason, a per-policy unique `note_number`

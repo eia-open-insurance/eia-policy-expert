@@ -137,6 +137,38 @@ class SchemaContractTest {
     }
 
     @Test
+    void schemaDefinesTheLegalEntityCatalogWithATenantUniqueCode() throws Exception {
+        String schema = schema();
+
+        assertThat(schema).contains("CREATE TABLE IF NOT EXISTS legal_entity");
+        assertThat(schema).contains("code VARCHAR(32) NOT NULL");
+        assertThat(schema).contains("name VARCHAR(200) NOT NULL");
+        assertThat(schema).contains("regulator VARCHAR(120)");
+        assertThat(schema).contains("license_number VARCHAR(80)");
+        assertThat(schema).contains("jurisdiction CHAR(2) NOT NULL");
+        assertThat(schema).contains(
+                "CONSTRAINT uq_legal_entity_code UNIQUE (tenant_id, code)");
+        assertThat(schema).contains(
+                "'INSURER', 'MGA', 'CAPTIVE', 'POOL', 'FRONTER'");
+        assertThat(schema).contains("CHECK (status IN ('ACTIVE', 'INACTIVE'))");
+        assertThat(schema).contains("idx_legal_entity_tenant_created");
+    }
+
+    @Test
+    void schemaAddsTheNullableLegalEntityReferenceWithForeignKeyAndIndex() throws Exception {
+        String schema = schema();
+
+        assertThat(schema).contains(
+                "ALTER TABLE policy ADD COLUMN IF NOT EXISTS legal_entity_id UUID");
+        assertThat(schema).contains(
+                "ALTER TABLE policy DROP CONSTRAINT IF EXISTS fk_policy_legal_entity");
+        assertThat(schema).contains(
+                "FOREIGN KEY (legal_entity_id) REFERENCES legal_entity (id)");
+        assertThat(schema).contains(
+                "CREATE INDEX IF NOT EXISTS idx_policy_legal_entity");
+    }
+
+    @Test
     void schemaIndexesTheTenantWideReceivableScan() throws Exception {
         String schema = schema();
 

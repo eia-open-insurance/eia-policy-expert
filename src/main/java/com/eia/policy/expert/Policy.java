@@ -18,6 +18,11 @@ import java.util.UUID;
  * ({@code policy_program}, SPEC 11.2.4 {@code policy.program_id}). Assignment
  * is a policy command: it bumps the aggregate version and emits
  * {@code policy.policy.program-assigned}.</p>
+ *
+ * <p>{@code legalEntityId} is the nullable link to the legal entity master data
+ * ({@code legal_entity}, SPEC 10.11.2 / 11.2.4 issuing legal entity). Assignment
+ * is a policy command: it bumps the aggregate version and emits
+ * {@code policy.policy.legal-entity-assigned}.</p>
  */
 public record Policy(
         UUID id,
@@ -36,7 +41,8 @@ public record Policy(
         Instant createdAt,
         Instant updatedAt,
         UUID renewedFromPolicyId,
-        UUID programId
+        UUID programId,
+        UUID legalEntityId
 ) {
     /**
      * Compatibility constructor for policies that predate renewal lineage.
@@ -49,12 +55,12 @@ public record Policy(
                   Instant updatedAt) {
         this(id, tenantId, policyNumber, productCode, insuredPartyId, status, effectiveDate,
                 expirationDate, premiumAmount, premiumCurrency, limitAmount, limitCurrency,
-                version, createdAt, updatedAt, null, null);
+                version, createdAt, updatedAt, null, null, null);
     }
 
     /**
      * Compatibility constructor for policies with renewal lineage but no
-     * program assignment.
+     * program or legal entity assignment.
      */
     public Policy(UUID id, UUID tenantId, String policyNumber, String productCode,
                   UUID insuredPartyId, String status, LocalDate effectiveDate,
@@ -63,6 +69,20 @@ public record Policy(
                   Instant updatedAt, UUID renewedFromPolicyId) {
         this(id, tenantId, policyNumber, productCode, insuredPartyId, status, effectiveDate,
                 expirationDate, premiumAmount, premiumCurrency, limitAmount, limitCurrency,
-                version, createdAt, updatedAt, renewedFromPolicyId, null);
+                version, createdAt, updatedAt, renewedFromPolicyId, null, null);
+    }
+
+    /**
+     * Compatibility constructor for policies with renewal lineage and a program
+     * but no legal entity assignment.
+     */
+    public Policy(UUID id, UUID tenantId, String policyNumber, String productCode,
+                  UUID insuredPartyId, String status, LocalDate effectiveDate,
+                  LocalDate expirationDate, BigDecimal premiumAmount, String premiumCurrency,
+                  BigDecimal limitAmount, String limitCurrency, int version, Instant createdAt,
+                  Instant updatedAt, UUID renewedFromPolicyId, UUID programId) {
+        this(id, tenantId, policyNumber, productCode, insuredPartyId, status, effectiveDate,
+                expirationDate, premiumAmount, premiumCurrency, limitAmount, limitCurrency,
+                version, createdAt, updatedAt, renewedFromPolicyId, programId, null);
     }
 }

@@ -11,8 +11,10 @@ installment schedule, settlement, dunning actions, and the tenant-wide
 receivables read model), a mass tort profile slice (one profile per policy
 with tort, trigger, allocation, coverage block, and DRAFT/COMPLETE gating), a
 commercial program catalog slice (tenant-unique programs plus the nullable
-`policy.program_id` assignment), and a credit note slice (DRAFT/ISSUED/APPLIED/
-CANCELLED billing adjustments with per-policy numbering) from SPEC 11.2.
+`policy.program_id` assignment), a legal entity catalog slice (tenant-unique
+upper-case codes plus the nullable `policy.legal_entity_id` assignment), and a
+credit note slice (DRAFT/ISSUED/APPLIED/CANCELLED billing adjustments with
+per-policy numbering) from SPEC 11.2.
 
 Policy writes also append canonical domain events to the platform transactional
 outbox (SPEC 7.5.1) in the same database transaction as the aggregate write.
@@ -34,7 +36,8 @@ outbox (SPEC 7.5.1) in the same database transaction as the aggregate write.
 | `CreditNoteController` / `CreditNoteService` / `CreditNoteRepository` | Policy credit notes, per-policy numbering, and the DRAFT/ISSUED/APPLIED/CANCELLED lifecycle |
 | `MassTortProfileController` / `MassTortProfileService` / `MassTortProfileRepository` | One-profile-per-policy upsert, COMPLETE gating, and the profile outbox event |
 | `PolicyProgramController` / `PolicyProgramService` / `PolicyProgramRepository` | Commercial program catalog, policy assignment/clear, and the program outbox events |
-| `PolicyRules`, `VersionTimeline`, `CoverageRules`, `CancellationRules`, `CancellationMath`, `PartyRules`, `EndorsementRules`, `BillingRules`, `CreditNoteRules`, `MassTortProfileRules`, `ProgramRules` | Pure invariants with focused unit tests |
+| `LegalEntityController` / `LegalEntityService` / `LegalEntityRepository` | Legal entity catalog, policy assignment/clear, and the legal entity outbox events |
+| `PolicyRules`, `VersionTimeline`, `CoverageRules`, `CancellationRules`, `CancellationMath`, `PartyRules`, `EndorsementRules`, `BillingRules`, `CreditNoteRules`, `MassTortProfileRules`, `ProgramRules`, `LegalEntityRules` | Pure invariants with focused unit tests |
 | `PolicyVersionHasher`, `VersionIssuer` | Canonical version snapshot hash and issuance |
 | `CommandIdempotency` | Per-command replay/conflict behaviour |
 | `PolicyEvents`, `PolicyOutboxSchedulingConfiguration` | Canonical event envelopes and the Quartz outbox dispatch job |
@@ -69,6 +72,8 @@ aggregate change and the event row:
 | `PUT /api/v1/policies/{id}/mass-tort-profile` (also `/internal/v1` alias) | `policy.mass-tort-profile.updated`; every accepted upsert writes one event |
 | `POST /api/v1/programs` (also `/internal/v1` alias) | `policy.program.created` against the `Program` aggregate |
 | `PATCH /api/v1/policies/{id}/program` (also `/internal/v1` alias) | `policy.policy.program-assigned`; `programId` is null when the link is cleared, and every accepted command advances the policy version |
+| `POST /api/v1/legal-entities` (also `/internal/v1` alias) | `policy.legal-entity.created` against the `LegalEntity` aggregate |
+| `PATCH /api/v1/policies/{id}/legal-entity` (also `/internal/v1` alias) | `policy.policy.legal-entity-assigned`; `legalEntityId` is null when the link is cleared, and every accepted command advances the policy version |
 
 Payloads carry `policyId`, `policyNumber`, `status`, `version`, the policy
 effective/expiration dates, premium and limit amounts as scale-4 decimal
@@ -133,6 +138,16 @@ contract repository also still marks `GET /api/v1/programs` as planned; the
 expert now exposes the create/list/get surface plus the policy assignment
 command.
 
+The legal entity events are additive too. `policy.legal-entity.created` is
+emitted against the `LegalEntity` aggregate (`aggregateVersion=1`, payload
+`legalEntityId`, `code`, `name`, `entityType`, `jurisdiction`, `regulator`,
+`licenseNumber`, `status`, `createdAt`) and
+`policy.policy.legal-entity-assigned` against the policy (`legalEntityId` and
+`previousLegalEntityId`, explicitly null on clear, plus `changedFields`).
+Neither name is listed in `eia-contracts/asyncapi/policy.yaml` or
+`event-catalog.yaml` yet, and the contract still marks `/legal-entities` as
+planned.
+
 The credit note events are additive too: `policy.credit-note.issued`,
 `policy.credit-note.applied`, and `policy.credit-note.cancelled` are not listed
 in `eia-contracts/asyncapi/policy.yaml` or `event-catalog.yaml` yet. Their
@@ -172,6 +187,12 @@ The live smoke is opt-in and requires PostgreSQL.
 - The program catalog is create/list/get plus policy assignment only. Program
   lifecycle transitions (CLOSED), program edits, and lead-policy integrity are
   not exposed: `lead_policy_id` is stored as an opaque UUID without a FK.
+- The legal entity catalog is create/list/get plus policy assignment only.
+  Entity edits, ACTIVE/INACTIVE retirement, legal-entity relationships,
+  organization units, and the SPEC 10.11 NAIC/LEI/SAP company-code and
+  `external_code_map` columns are not exposed. `jurisdiction` is a two-letter
+  code as requested by this slice, while the wider SPEC model uses
+  `domicile_country` (ISO 3166-1 alpha-3).
 - Credit notes expose the DRAFT/ISSUED/APPLIED/CANCELLED lifecycle only. There
   is no application to a specific installment or receivable, no credit-note
   reversal, no GL/AR posting, and no idempotency-key replay for note creation.

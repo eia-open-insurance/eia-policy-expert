@@ -52,6 +52,8 @@ final class PolicyEvents {
     static final String MASS_TORT_PROFILE_UPDATED = "policy.mass-tort-profile.updated";
     static final String PROGRAM_CREATED = "policy.program.created";
     static final String PROGRAM_ASSIGNED = "policy.policy.program-assigned";
+    static final String LEGAL_ENTITY_CREATED = "policy.legal-entity.created";
+    static final String LEGAL_ENTITY_ASSIGNED = "policy.policy.legal-entity-assigned";
 
     private static final Book EVENT_BOOK = Book.DIRECT;
     private static final String VERTICAL = "policy";
@@ -59,6 +61,8 @@ final class PolicyEvents {
     private static final String SUBJECT_TYPE = "policy";
     private static final String PROGRAM_AGGREGATE_TYPE = "Program";
     private static final String PROGRAM_SUBJECT_TYPE = "program";
+    private static final String LEGAL_ENTITY_AGGREGATE_TYPE = "LegalEntity";
+    private static final String LEGAL_ENTITY_SUBJECT_TYPE = "legal-entity";
     private static final String SOURCE_BUILD = "eia-policy-expert@0.1.0-SNAPSHOT";
 
     private PolicyEvents() {
@@ -154,6 +158,77 @@ final class PolicyEvents {
                 before.programId() == null ? NullNode.getInstance() : before.programId());
         data.put("changedFields", List.of("programId"));
         return envelope(after, PROGRAM_ASSIGNED, data, now);
+    }
+
+    /**
+     * Legal entity assignment is a policy command: the policy aggregate version
+     * advances and the event always carries {@code legalEntityId}, which is null
+     * when the link is cleared.
+     */
+    static EventEnvelope legalEntityAssigned(Policy before, Policy after, Instant now) {
+        Objects.requireNonNull(before, "before");
+        Objects.requireNonNull(after, "after");
+        Map<String, Object> data = base(after);
+        data.put("legalEntityId",
+                after.legalEntityId() == null
+                        ? NullNode.getInstance() : after.legalEntityId());
+        data.put("previousLegalEntityId",
+                before.legalEntityId() == null
+                        ? NullNode.getInstance() : before.legalEntityId());
+        data.put("changedFields", List.of("legalEntityId"));
+        return envelope(after, LEGAL_ENTITY_ASSIGNED, data, now);
+    }
+
+    /**
+     * A legal entity is a catalog aggregate in the policy vertical, so its
+     * creation is reported as {@code policy.legal-entity.created} against the
+     * LegalEntity aggregate with aggregate version 1.
+     */
+    static EventEnvelope legalEntityCreated(LegalEntity legalEntity, Instant now) {
+        Objects.requireNonNull(legalEntity, "legalEntity");
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("legalEntityId", legalEntity.id());
+        data.put("code", legalEntity.code());
+        data.put("name", legalEntity.name());
+        data.put("entityType", legalEntity.entityType());
+        data.put("jurisdiction", legalEntity.jurisdiction());
+        // The canonical event JSON omits null map values; a JSON null node keeps
+        // the nullable contract members present for consumers.
+        data.put("regulator",
+                legalEntity.regulator() == null
+                        ? NullNode.getInstance() : legalEntity.regulator());
+        data.put("licenseNumber",
+                legalEntity.licenseNumber() == null
+                        ? NullNode.getInstance() : legalEntity.licenseNumber());
+        data.put("status", legalEntity.status());
+        data.put("createdAt", instant(legalEntity.createdAt()));
+        return legalEntityEnvelope(legalEntity, LEGAL_ENTITY_CREATED, data, now);
+    }
+
+    private static EventEnvelope legalEntityEnvelope(LegalEntity legalEntity, String eventType,
+                                                      Map<String, Object> data, Instant now) {
+        UUID eventId = EventIds.deterministic(legalEntity.tenantId(),
+                LEGAL_ENTITY_AGGREGATE_TYPE, legalEntity.id(), 1L, eventType);
+        return EventEnvelope.builder()
+                .eventId(eventId)
+                .eventType(eventType)
+                .eventVersion(1)
+                .occurredAt(now)
+                .recordedAt(now)
+                .tenantId(legalEntity.tenantId())
+                .book(EVENT_BOOK)
+                .vertical(VERTICAL)
+                .aggregateType(LEGAL_ENTITY_AGGREGATE_TYPE)
+                .aggregateId(legalEntity.id())
+                .aggregateVersion(1)
+                .sequence(0)
+                .actor(EventActor.system("eia-policy-expert"))
+                .subject(EventSubject.of(VERTICAL, LEGAL_ENTITY_SUBJECT_TYPE,
+                        legalEntity.id(), legalEntity.code()))
+                .links(List.of())
+                .data(data)
+                .metadata(EventMetadata.v1(SOURCE_BUILD))
+                .build();
     }
 
     private static EventEnvelope programEnvelope(PolicyProgram program, String eventType,

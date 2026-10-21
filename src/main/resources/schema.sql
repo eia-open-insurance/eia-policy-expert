@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS policy (
     limit_currency CHAR(3) NOT NULL,
     renewed_from_policy_id UUID,
     program_id UUID,
+    legal_entity_id UUID,
     version INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL,
@@ -84,6 +85,44 @@ ALTER TABLE policy ADD CONSTRAINT fk_policy_program
     FOREIGN KEY (program_id) REFERENCES policy_program (id);
 
 CREATE INDEX IF NOT EXISTS idx_policy_program ON policy (tenant_id, program_id);
+
+-- Legal entity master data (SPEC 10.11.2). A legal entity is the regulated
+-- carrier, MGA, captive, pool, or fronter that issues or fronts a policy. The
+-- code is unique per tenant and the jurisdiction is an ISO 3166-1 alpha-2 code.
+CREATE TABLE IF NOT EXISTS legal_entity (
+    id UUID PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    code VARCHAR(32) NOT NULL,
+    name VARCHAR(200) NOT NULL,
+    entity_type VARCHAR(32) NOT NULL,
+    jurisdiction CHAR(2) NOT NULL,
+    regulator VARCHAR(120),
+    license_number VARCHAR(80),
+    status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',
+    created_at TIMESTAMPTZ NOT NULL,
+    CONSTRAINT uq_legal_entity_code UNIQUE (tenant_id, code),
+    CONSTRAINT ck_legal_entity_type CHECK (entity_type IN (
+        'INSURER', 'MGA', 'CAPTIVE', 'POOL', 'FRONTER'
+    )),
+    CONSTRAINT ck_legal_entity_status CHECK (status IN ('ACTIVE', 'INACTIVE')),
+    CONSTRAINT ck_legal_entity_jurisdiction
+        CHECK (CHAR_LENGTH(jurisdiction) = 2)
+);
+
+CREATE INDEX IF NOT EXISTS idx_legal_entity_tenant_created
+    ON legal_entity (tenant_id, created_at DESC, id);
+
+-- Nullable policy-to-legal-entity link. The column is added with an idempotent
+-- ALTER so an already-migrated database picks it up. PostgreSQL has no
+-- ADD CONSTRAINT IF NOT EXISTS, so the FK is dropped and re-added on startup;
+-- that is idempotent and keeps the constraint definition in one place.
+ALTER TABLE policy ADD COLUMN IF NOT EXISTS legal_entity_id UUID;
+ALTER TABLE policy DROP CONSTRAINT IF EXISTS fk_policy_legal_entity;
+ALTER TABLE policy ADD CONSTRAINT fk_policy_legal_entity
+    FOREIGN KEY (legal_entity_id) REFERENCES legal_entity (id);
+
+CREATE INDEX IF NOT EXISTS idx_policy_legal_entity
+    ON policy (tenant_id, legal_entity_id);
 
 -- Idempotency scope for POST /internal/v1/policies: tenant + key. The unique
 -- constraint is the concurrency arbiter for duplicate creates. The row is
