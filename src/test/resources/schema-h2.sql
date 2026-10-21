@@ -5,6 +5,7 @@
 
 CREATE SEQUENCE IF NOT EXISTS policy_number_seq START 1;
 CREATE SEQUENCE IF NOT EXISTS policy_program_number_seq START 1;
+CREATE SEQUENCE IF NOT EXISTS policy_credit_note_number_seq START 1;
 
 CREATE TABLE IF NOT EXISTS policy (
     id UUID PRIMARY KEY,
@@ -457,6 +458,35 @@ CREATE INDEX IF NOT EXISTS idx_billing_dunning_action_installment
     ON billing_dunning_action (tenant_id, installment_id, sent_at DESC);
 CREATE INDEX IF NOT EXISTS idx_billing_dunning_action_policy
     ON billing_dunning_action (tenant_id, policy_id, sent_at DESC);
+
+-- H2-compatible copy of the credit note table. The CHECK constraints mirror the
+-- PostgreSQL DDL; H2 accepts CHAR_LENGTH and the same UUID/FK forms.
+CREATE TABLE IF NOT EXISTS policy_credit_note (
+    id UUID PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    policy_id UUID NOT NULL REFERENCES policy (id) ON DELETE CASCADE,
+    note_number VARCHAR(32) NOT NULL,
+    amount NUMERIC(19,4) NOT NULL,
+    currency CHAR(3) NOT NULL,
+    reason TEXT,
+    status VARCHAR(16) NOT NULL DEFAULT 'DRAFT',
+    issued_at TIMESTAMP WITH TIME ZONE,
+    applied_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    CONSTRAINT uq_policy_credit_note_number UNIQUE (policy_id, note_number),
+    CONSTRAINT ck_policy_credit_note_amount CHECK (amount > 0),
+    CONSTRAINT ck_policy_credit_note_reason
+        CHECK (reason IS NULL OR CHAR_LENGTH(reason) <= 500),
+    CONSTRAINT ck_policy_credit_note_status
+        CHECK (status IN ('DRAFT', 'ISSUED', 'APPLIED', 'CANCELLED')),
+    CONSTRAINT ck_policy_credit_note_issued
+        CHECK (status NOT IN ('ISSUED', 'APPLIED') OR issued_at IS NOT NULL),
+    CONSTRAINT ck_policy_credit_note_applied
+        CHECK (status <> 'APPLIED' OR applied_at IS NOT NULL)
+);
+
+CREATE INDEX IF NOT EXISTS idx_policy_credit_note_policy
+    ON policy_credit_note (tenant_id, policy_id, created_at DESC, note_number DESC);
 
 -- H2-compatible copy of the mass tort profile table. The unique policy_id is
 -- the upsert arbiter and the CHECK constraints mirror the PostgreSQL DDL.

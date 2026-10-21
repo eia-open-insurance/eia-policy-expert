@@ -87,6 +87,20 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   `policy.policy.program-assigned` (policy aggregate, `programId` set or null)
   outbox events written in the same transaction as the catalog row or policy
   assignment.
+- Policy credit note slice: idempotent `policy_credit_note` table with a
+  positive `numeric(19,4)` amount in the policy currency, an optional
+  500-character reason, a per-policy unique `note_number`
+  (`uq_policy_credit_note_number`), and the DRAFT/ISSUED/APPLIED/CANCELLED
+  lifecycle with `issued_at`/`applied_at` columns and status/timestamp checks.
+- `GET`/`POST /api/v1/policies/{policyId}/credit-notes` and
+  `PATCH /api/v1/policies/{policyId}/credit-notes/{creditNoteId}/status` (each
+  also under `/internal/v1`) with tenant-header/query scoping, the DIRECT-book
+  gate, newest-first listing, `201` DRAFT creation, amount/currency/reason
+  validation, and `409` for out-of-order or terminal transitions.
+- `policy.credit-note.issued`, `policy.credit-note.applied`, and
+  `policy.credit-note.cancelled` outbox events (`policyId`, `policyNumber`,
+  `creditNoteId`, `noteNumber`, `amount`, `currency`, `status`) written in the
+  same transaction as the status change and policy version bump.
 
 ### Changed
 

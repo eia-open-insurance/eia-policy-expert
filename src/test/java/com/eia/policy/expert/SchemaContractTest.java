@@ -166,6 +166,25 @@ class SchemaContractTest {
     }
 
     @Test
+    void schemaDefinesCreditNotesWithPerPolicyNumberAndLifecycleChecks() throws Exception {
+        String schema = schema();
+
+        assertThat(schema).contains("CREATE TABLE IF NOT EXISTS policy_credit_note");
+        assertThat(schema).contains("CREATE SEQUENCE IF NOT EXISTS policy_credit_note_number_seq");
+        assertThat(schema).contains("amount NUMERIC(19,4) NOT NULL");
+        assertThat(schema).contains(
+                "CONSTRAINT uq_policy_credit_note_number UNIQUE (policy_id, note_number)");
+        assertThat(schema).contains("CONSTRAINT ck_policy_credit_note_amount CHECK (amount > 0)");
+        assertThat(schema).contains(
+                "CHECK (status IN ('DRAFT', 'ISSUED', 'APPLIED', 'CANCELLED'))");
+        assertThat(schema).contains("CONSTRAINT ck_policy_credit_note_issued");
+        assertThat(schema).contains("CONSTRAINT ck_policy_credit_note_applied");
+        assertThat(schema).contains("issued_at TIMESTAMPTZ");
+        assertThat(schema).contains("applied_at TIMESTAMPTZ");
+        assertThat(schema).contains("idx_policy_credit_note_policy");
+    }
+
+    @Test
     void schemaMatchesThePlatformTransactionalOutbox() throws Exception {
         String schema = schema();
 

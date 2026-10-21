@@ -7,6 +7,7 @@
 
 CREATE SEQUENCE IF NOT EXISTS policy_number_seq START 1;
 CREATE SEQUENCE IF NOT EXISTS policy_program_number_seq START 1;
+CREATE SEQUENCE IF NOT EXISTS policy_credit_note_number_seq START 1;
 
 CREATE TABLE IF NOT EXISTS policy (
     id UUID PRIMARY KEY,
@@ -519,6 +520,38 @@ CREATE INDEX IF NOT EXISTS idx_billing_dunning_action_installment
     ON billing_dunning_action (tenant_id, installment_id, sent_at DESC);
 CREATE INDEX IF NOT EXISTS idx_billing_dunning_action_policy
     ON billing_dunning_action (tenant_id, policy_id, sent_at DESC);
+
+-- Policy credit notes (SPEC 11.2.13 billing adjustments). A credit note starts
+-- DRAFT and then advances to ISSUED, APPLIED, or CANCELLED; note_number is
+-- unique per policy and the sequence keeps concurrent creates collision-free.
+-- issued_at/applied_at are set by the transition that reaches that state, so a
+-- CANCELLED note never invents a timestamp.
+CREATE TABLE IF NOT EXISTS policy_credit_note (
+    id UUID PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    policy_id UUID NOT NULL REFERENCES policy (id) ON DELETE CASCADE,
+    note_number VARCHAR(32) NOT NULL,
+    amount NUMERIC(19,4) NOT NULL,
+    currency CHAR(3) NOT NULL,
+    reason TEXT,
+    status VARCHAR(16) NOT NULL DEFAULT 'DRAFT',
+    issued_at TIMESTAMPTZ,
+    applied_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL,
+    CONSTRAINT uq_policy_credit_note_number UNIQUE (policy_id, note_number),
+    CONSTRAINT ck_policy_credit_note_amount CHECK (amount > 0),
+    CONSTRAINT ck_policy_credit_note_reason
+        CHECK (reason IS NULL OR CHAR_LENGTH(reason) <= 500),
+    CONSTRAINT ck_policy_credit_note_status
+        CHECK (status IN ('DRAFT', 'ISSUED', 'APPLIED', 'CANCELLED')),
+    CONSTRAINT ck_policy_credit_note_issued
+        CHECK (status NOT IN ('ISSUED', 'APPLIED') OR issued_at IS NOT NULL),
+    CONSTRAINT ck_policy_credit_note_applied
+        CHECK (status <> 'APPLIED' OR applied_at IS NOT NULL)
+);
+
+CREATE INDEX IF NOT EXISTS idx_policy_credit_note_policy
+    ON policy_credit_note (tenant_id, policy_id, created_at DESC, note_number DESC);
 
 -- Mass tort policy profile (SPEC 11.2.4 `policy_mass_tort_profile`). One row
 -- per policy; the unique policy_id is the upsert arbiter. A COMPLETE profile

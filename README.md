@@ -46,6 +46,11 @@ contract structures from SPEC 11.2:
   installment and escalation level, with channel, notes, status, and sent time.
   The unique `(tenant_id, installment_id, level)` key is the duplicate-send
   arbiter.
+- `policy_credit_note`: policy billing adjustments with a positive
+  `numeric(19,4)` amount in the policy currency, an optional 500-character
+  reason, a per-policy unique `note_number`, and the DRAFT/ISSUED/APPLIED/
+  CANCELLED lifecycle with `issued_at`/`applied_at` stamped by the transition
+  that reaches each state.
 - `policy_mass_tort_profile`: one profile per policy carrying the tort type,
   trigger theory, allocation method/notes, an inclusive coverage block, and
   DRAFT/COMPLETE status. A COMPLETE profile requires the notes and both block
@@ -63,6 +68,7 @@ contract structures from SPEC 11.2:
   each covered mutation (`created`, `updated`, `version-issued`, `endorsed`,
   `cancelled`, `reinstated`, `renewed`, `billing-plan.created`, `installment.paid`,
   `installment.waived`, `dunning.sent`, `mass-tort-profile.updated`,
+  `credit-note.issued`, `credit-note.applied`, `credit-note.cancelled`,
   `program.created`, `policy.program-assigned`), with conditional Quartz HTTP
   dispatch.
 
@@ -179,6 +185,28 @@ the start is a `400 INVALID_PROGRAM_DATES`. The tenant comes from `?tenantId=` o
 write `policy.policy.program-assigned` with `programId` set or `null` in the same
 transaction as the policy version bump. A program id from another tenant is a
 `404 PROGRAM_NOT_FOUND`.
+
+Credit notes are exposed under `/api/v1/policies/{policyId}/credit-notes` (the
+same controller keeps the `/internal/v1` alias for the domain adapter):
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/v1/policies/{policyId}/credit-notes` | Credit notes for the policy, newest first |
+| `POST` | `/api/v1/policies/{policyId}/credit-notes` | Create a `DRAFT` note; `201` |
+| `PATCH` | `/api/v1/policies/{policyId}/credit-notes/{creditNoteId}/status` | Transition to `ISSUED`, `APPLIED`, or `CANCELLED`; `409` for an out-of-order or terminal transition |
+
+The create body is `{amount, currency, reason?}`. `amount` must be greater than
+zero, `currency` must match the policy premium currency (case-insensitive,
+stored upper-case), and `reason` is optional, trimmed, and capped at 500
+characters. The tenant comes from `?tenantId=` or `X-EIA-Tenant`, and the route
+is fixed to the DIRECT book. A new note is `DRAFT`; `DRAFT` may move to `ISSUED`
+or `CANCELLED`, `ISSUED` may move to `APPLIED` or `CANCELLED`, and `APPLIED` /
+`CANCELLED` are terminal. `ISSUED` stamps `issuedAt`, `APPLIED` stamps
+`appliedAt`, and `CANCELLED` stamps neither. Every accepted transition bumps the
+policy aggregate version and writes `policy.credit-note.issued`,
+`policy.credit-note.applied`, or `policy.credit-note.cancelled` (`policyId`,
+`policyNumber`, `creditNoteId`, `noteNumber`, `amount`, `currency`, `status`) in
+the same transaction.
 
 The tenant-wide premium receivables worklist is
 `GET /api/v1/billing/installments` (also exposed under

@@ -46,6 +46,9 @@ final class PolicyEvents {
     static final String INSTALLMENT_PAID = "policy.installment.paid";
     static final String INSTALLMENT_WAIVED = "policy.installment.waived";
     static final String DUNNING_SENT = "policy.dunning.sent";
+    static final String CREDIT_NOTE_ISSUED = "policy.credit-note.issued";
+    static final String CREDIT_NOTE_APPLIED = "policy.credit-note.applied";
+    static final String CREDIT_NOTE_CANCELLED = "policy.credit-note.cancelled";
     static final String MASS_TORT_PROFILE_UPDATED = "policy.mass-tort-profile.updated";
     static final String PROGRAM_CREATED = "policy.program.created";
     static final String PROGRAM_ASSIGNED = "policy.policy.program-assigned";
@@ -84,6 +87,33 @@ final class PolicyEvents {
                 ? List.of()
                 : installments.stream().map(PolicyEvents::installmentData).toList());
         return envelope(policy, BILLING_PLAN_CREATED, data, now);
+    }
+
+    /**
+     * A credit note transition is a policy aggregate change: the payload
+     * carries the policy and note identifiers, the money value, and the new
+     * status. The policy version advances with the transition, so every event
+     * gets a distinct {@code aggregateVersion}.
+     */
+    static EventEnvelope creditNoteStatusChanged(Policy policy, PolicyCreditNote creditNote,
+                                                 Instant now) {
+        Objects.requireNonNull(creditNote, "creditNote");
+        String eventType = switch (creditNote.status()) {
+            case CreditNoteRules.ISSUED -> CREDIT_NOTE_ISSUED;
+            case CreditNoteRules.APPLIED -> CREDIT_NOTE_APPLIED;
+            case CreditNoteRules.CANCELLED -> CREDIT_NOTE_CANCELLED;
+            default -> throw new IllegalArgumentException(
+                    "Unsupported credit note status: " + creditNote.status());
+        };
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("policyId", policy.id());
+        data.put("policyNumber", policy.policyNumber());
+        data.put("creditNoteId", creditNote.id());
+        data.put("noteNumber", creditNote.noteNumber());
+        data.put("amount", money(creditNote.amount()));
+        data.put("currency", creditNote.currency());
+        data.put("status", creditNote.status());
+        return envelope(policy, eventType, data, now);
     }
 
     /**
