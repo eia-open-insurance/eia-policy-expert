@@ -10,8 +10,9 @@ import java.util.Set;
  * states.
  *
  * <p>Dunning is allowed while the <em>effective</em> installment status is DUE
- * or OVERDUE. A stored DUE row past its due date is effectively OVERDUE; PAID
- * and WAIVED rows are terminal and reject dunning with a 409.</p>
+ * or OVERDUE. A stored DUE row past its due date is effectively OVERDUE; PAID,
+ * WAIVED, and fully CREDITED rows are terminal and reject dunning with a
+ * 409.</p>
  */
 final class BillingDunningRules {
     static final int MAX_NOTES_LENGTH = 2000;

@@ -11,7 +11,8 @@ import java.util.Set;
 
 /**
  * Pure billing invariants: frequency/status vocabulary, the 1..24 installment
- * window, and the equal split with a remainder on the last installment.
+ * window, the equal split with a remainder on the last installment, and the
+ * collectible remainder after applied credit notes.
  *
  * <p>The split uses the same numeric(19,4) money semantics as the rest of the
  * Policy vertical (HALF_UP at scale 4). The first n-1 amounts are equal and the
@@ -33,11 +34,13 @@ final class BillingRules {
     static final String OVERDUE = "OVERDUE";
     static final String PAID = "PAID";
     static final String WAIVED = "WAIVED";
+    static final String CREDITED = "CREDITED";
 
     private static final Set<String> FREQUENCIES =
             Set.of(MONTHLY, QUARTERLY, SEMI_ANNUAL, ANNUAL);
     private static final Set<String> SETTLEABLE = Set.of(DUE, OVERDUE);
-    private static final Set<String> TERMINAL = Set.of(PAID, WAIVED);
+    private static final Set<String> SETTLEMENT_TARGETS = Set.of(PAID, WAIVED);
+    private static final Set<String> TERMINAL = Set.of(PAID, WAIVED, CREDITED);
     private static final Set<String> RECEIVABLE = Set.of(DUE, OVERDUE);
 
     private BillingRules() {
@@ -78,7 +81,7 @@ final class BillingRules {
 
     static String normalizeTargetStatus(String raw) {
         String value = raw == null ? "" : raw.trim().toUpperCase(Locale.ROOT);
-        if (!TERMINAL.contains(value)) {
+        if (!SETTLEMENT_TARGETS.contains(value)) {
             throw PolicyErrors.badRequest("INVALID_INSTALLMENT_STATUS", "status",
                     "status must be PAID or WAIVED.");
         }
@@ -91,6 +94,23 @@ final class BillingRules {
 
     static boolean isSettleable(String status) {
         return SETTLEABLE.contains(status);
+    }
+
+    /**
+     * The collectible remainder of one installment. WAIVED, PAID, and CREDITED
+     * rows owe nothing; an open DUE/OVERDUE row owes its gross amount less the
+     * credits already applied to it. The result is never negative.
+     */
+    static BigDecimal outstandingAmount(BigDecimal amount, BigDecimal creditedAmount,
+                                        String status) {
+        if (PAID.equals(status) || WAIVED.equals(status) || CREDITED.equals(status)) {
+            return Money.of(BigDecimal.ZERO);
+        }
+        BigDecimal gross = Money.of(amount == null ? BigDecimal.ZERO : amount);
+        BigDecimal credited = Money.of(
+                creditedAmount == null ? BigDecimal.ZERO : creditedAmount);
+        BigDecimal outstanding = gross.subtract(credited);
+        return outstanding.signum() < 0 ? Money.of(BigDecimal.ZERO) : outstanding;
     }
 
     /**

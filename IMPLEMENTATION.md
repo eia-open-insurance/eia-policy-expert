@@ -14,7 +14,7 @@ commercial program catalog slice (tenant-unique programs plus the nullable
 `policy.program_id` assignment), a legal entity catalog slice (tenant-unique
 upper-case codes plus the nullable `policy.legal_entity_id` assignment), and a
 credit note slice (DRAFT/ISSUED/APPLIED/CANCELLED billing adjustments with
-per-policy numbering) from SPEC 11.2.
+per-policy numbering and application to open installments) from SPEC 11.2.
 
 Policy writes also append canonical domain events to the platform transactional
 outbox (SPEC 7.5.1) in the same database transaction as the aggregate write.
@@ -30,10 +30,10 @@ outbox (SPEC 7.5.1) in the same database transaction as the aggregate write.
 | `PolicyPartyController` / `PolicyPartyService` / `PolicyPartyRepository` | Insureds and locations |
 | `CancellationController` / `CancellationService` / `CancellationRepository` | Cancellation, return premium, reinstatement |
 | `PolicyRenewalController` / `PolicyRenewalService` / `PolicyRenewalRules` | Renewal DRAFT creation, predecessor lineage, term inheritance |
-| `BillingController` / `BillingService` / `BillingRepository` | Billing plan, installment schedule, PAID/WAIVED settlement |
+| `BillingController` / `BillingService` / `BillingRepository` | Billing plan, installment schedule, PAID/WAIVED settlement, and the paid/waived/credited/outstanding plan summary |
 | `BillingDunningController` / `BillingDunningService` / `BillingDunningRepository` | Installment dunning actions, duplicate-level arbitration, and the dunning outbox event |
-| `BillingReceivablesController` / `ReceivableRow` / `InstallmentReceivable` | Tenant-wide premium receivables read model with derived overdue status and latest-SENT dunning enrichment |
-| `CreditNoteController` / `CreditNoteService` / `CreditNoteRepository` | Policy credit notes, per-policy numbering, and the DRAFT/ISSUED/APPLIED/CANCELLED lifecycle |
+| `BillingReceivablesController` / `ReceivableRow` / `InstallmentReceivable` | Tenant-wide open-premium receivables read model with derived overdue status, outstanding-after-credit amounts, and latest-SENT dunning enrichment |
+| `CreditNoteController` / `CreditNoteService` / `CreditNoteRepository` | Policy credit notes, per-policy numbering, the DRAFT/ISSUED/APPLIED/CANCELLED lifecycle, and application to an open installment |
 | `MassTortProfileController` / `MassTortProfileService` / `MassTortProfileRepository` | One-profile-per-policy upsert, COMPLETE gating, and the profile outbox event |
 | `PolicyProgramController` / `PolicyProgramService` / `PolicyProgramRepository` | Commercial program catalog, policy assignment/clear, and the program outbox events |
 | `LegalEntityController` / `LegalEntityService` / `LegalEntityRepository` | Legal entity catalog, policy assignment/clear, and the legal entity outbox events |
@@ -68,7 +68,7 @@ aggregate change and the event row:
 | `PATCH /api/v1/policies/{id}/billing/installments/{installmentId}` | `policy.installment.paid` or `policy.installment.waived`; same-status replay writes nothing |
 | `POST /api/v1/billing/installments/{installmentId}/dunning` (also `/internal/v1` alias) | `policy.dunning.sent`; each accepted action advances the policy version |
 | `POST /api/v1/policies/{id}/credit-notes` (also `/internal/v1` alias) | none; the note is created `DRAFT` |
-| `PATCH /api/v1/policies/{id}/credit-notes/{creditNoteId}/status` (also `/internal/v1` alias) | `policy.credit-note.issued`, `policy.credit-note.applied`, or `policy.credit-note.cancelled`; terminal/out-of-order transitions are `409`, and each accepted transition advances the policy version |
+| `PATCH /api/v1/policies/{id}/credit-notes/{creditNoteId}/status` (also `/internal/v1` alias) | `policy.credit-note.issued`, `policy.credit-note.applied`, or `policy.credit-note.cancelled`; an APPLIED transition credits the named open installment (or `409`s), terminal/out-of-order transitions are `409`, and each accepted transition advances the policy version |
 | `PUT /api/v1/policies/{id}/mass-tort-profile` (also `/internal/v1` alias) | `policy.mass-tort-profile.updated`; every accepted upsert writes one event |
 | `POST /api/v1/programs` (also `/internal/v1` alias) | `policy.program.created` against the `Program` aggregate |
 | `PATCH /api/v1/policies/{id}/program` (also `/internal/v1` alias) | `policy.policy.program-assigned`; `programId` is null when the link is cleared, and every accepted command advances the policy version |
@@ -152,14 +152,45 @@ The credit note events are additive too: `policy.credit-note.issued`,
 `policy.credit-note.applied`, and `policy.credit-note.cancelled` are not listed
 in `eia-contracts/asyncapi/policy.yaml` or `event-catalog.yaml` yet. Their
 payload carries `policyId`, `policyNumber`, `creditNoteId`, `noteNumber`,
-`amount` (scale-4 decimal string), `currency`, and the new `status`. Creating a
-note writes no event, because the DRAFT creation is not part of the requested
-event set; only the three lifecycle transitions emit one.
+`amount` (scale-4 decimal string), `currency`, and the new `status`. The
+`applied` event additionally carries `installmentId` and the installment's
+cumulative `creditedAmount` after the application; `issued` and `cancelled`
+never name an installment. Creating a note writes no event, because the DRAFT
+creation is not part of the requested event set; only the three lifecycle
+transitions emit one.
 
 `policy.policy.version-issued` is emitted by the issue, endorsement,
 cancellation, and reinstatement commands. Coverage/insured/location changes can
 also issue a version, but those writes are outside the requested event set and
 remain event-free in this slice.
+
+## Credit application and outstanding amounts
+
+`policy_installment.credited_amount` starts at zero and accumulates applied
+credit notes (`ck_policy_installment_credited` keeps it between zero and the
+gross amount). `policy_credit_note.applied_installment_id` records the
+installment an APPLIED note settled against; it is nullable for historical
+APPLIED notes and for notes that never applied. `CREDITED` is a terminal
+installment status, reached only when the credits cover the gross amount.
+
+Applying is an ISSUED -&gt; APPLIED transition that also requires
+`installmentId`. The rules reject a missing id (`400
+INVALID_CREDIT_NOTE_INSTALLMENT`), a missing/cross-tenant/cross-policy
+installment (`404 INSTALLMENT_NOT_FOUND`), a PAID/WAIVED/CREDITED target (`409
+INSTALLMENT_NOT_CREDITABLE`), and an amount above
+`amount - credited_amount` (`409 CREDIT_NOTE_EXCEEDS_INSTALLMENT` with
+`noteAmount`/`availableAmount` meta). The conditional installment UPDATE
+re-checks the open status and the uncredited remainder, so a concurrent credit
+cannot overdraw the row; the note transition rolls back with it.
+
+Read models derive `outstandingAmount` as `amount - creditedAmount` for an open
+DUE/OVERDUE row and zero for PAID/WAIVED/CREDITED. The billing plan read exposes
+per-installment `creditedAmount`/`outstandingAmount` plus a summary
+(`totalAmount`, `paidAmount`, `waivedAmount`, `creditedAmount`,
+`outstandingAmount`, `overdueAmount`, `currency`, `installmentCount`) whose
+outstanding total is the sum of the row remainders. The tenant-wide receivables
+read keeps `amount` gross but sums `outstandingAmount` into `totalAmount` and
+`overdueAmount`, and it excludes fully CREDITED rows along with PAID/WAIVED.
 
 ## Verification
 
@@ -193,9 +224,12 @@ The live smoke is opt-in and requires PostgreSQL.
   `external_code_map` columns are not exposed. `jurisdiction` is a two-letter
   code as requested by this slice, while the wider SPEC model uses
   `domicile_country` (ISO 3166-1 alpha-3).
-- Credit notes expose the DRAFT/ISSUED/APPLIED/CANCELLED lifecycle only. There
-  is no application to a specific installment or receivable, no credit-note
-  reversal, no GL/AR posting, and no idempotency-key replay for note creation.
+- Credit notes expose the DRAFT/ISSUED/APPLIED/CANCELLED lifecycle and
+  application to one open installment. There is no credit-note reversal or
+  unapply command, no partial reversal, no GL/AR posting, and no
+  idempotency-key replay for note creation. A note can only settle the
+  installment it names; it is not allocated across multiple installments or
+  receivables.
 - Coverage/limit rows are keyed by coverage code and unique active code; the
   full `coverage`, `coverage_type`, layer, and form reference tables from
   SPEC 10.11 are not loaded.

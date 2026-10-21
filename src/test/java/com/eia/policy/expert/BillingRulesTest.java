@@ -116,13 +116,32 @@ class BillingRulesTest {
 
     @Test
     void rejectsInstallmentStatesOtherThanPaidOrWaived() {
-        assertThatThrownBy(() -> BillingRules.normalizeTargetStatus("DUE"))
-                .isInstanceOf(ApiException.class)
-                .satisfies(ex -> {
-                    ApiException api = (ApiException) ex;
-                    assertThat(api.status()).isEqualTo(HttpStatus.BAD_REQUEST);
-                    assertThat(api.code()).isEqualTo("INVALID_INSTALLMENT_STATUS");
-                });
+        for (String status : List.of("DUE", "OVERDUE", "CREDITED")) {
+            assertThatThrownBy(() -> BillingRules.normalizeTargetStatus(status))
+                    .isInstanceOf(ApiException.class)
+                    .satisfies(ex -> {
+                        ApiException api = (ApiException) ex;
+                        assertThat(api.status()).isEqualTo(HttpStatus.BAD_REQUEST);
+                        assertThat(api.code()).isEqualTo("INVALID_INSTALLMENT_STATUS");
+                    });
+        }
+    }
+
+    @Test
+    void outstandingAmountsRespectCreditsAndTerminalStates() {
+        assertThat(BillingRules.outstandingAmount(new BigDecimal("100.0000"),
+                new BigDecimal("25.0000"), BillingRules.DUE)).isEqualByComparingTo("75.0000");
+        assertThat(BillingRules.outstandingAmount(new BigDecimal("100.0000"),
+                new BigDecimal("25.0000"), BillingRules.OVERDUE)).isEqualByComparingTo("75.0000");
+        assertThat(BillingRules.outstandingAmount(new BigDecimal("100.0000"),
+                new BigDecimal("25.0000"), BillingRules.PAID)).isEqualByComparingTo("0.0000");
+        assertThat(BillingRules.outstandingAmount(new BigDecimal("100.0000"),
+                BigDecimal.ZERO, BillingRules.WAIVED)).isEqualByComparingTo("0.0000");
+        assertThat(BillingRules.outstandingAmount(new BigDecimal("100.0000"),
+                new BigDecimal("100.0000"), BillingRules.CREDITED))
+                .isEqualByComparingTo("0.0000");
+        assertThat(BillingRules.isSettled(BillingRules.CREDITED)).isTrue();
+        assertThat(BillingRules.isSettleable(BillingRules.CREDITED)).isFalse();
     }
 
     @Test

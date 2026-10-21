@@ -56,7 +56,12 @@ class BillingControllerTest {
                 .andExpect(jsonPath("$.plan.frequency").value("MONTHLY"))
                 .andExpect(jsonPath("$.installments.length()").value(3))
                 .andExpect(jsonPath("$.installments[2].amount").value("40000.0000"))
-                .andExpect(jsonPath("$.installments[2].status").value("DUE"));
+                .andExpect(jsonPath("$.installments[2].creditedAmount").value("0.0000"))
+                .andExpect(jsonPath("$.installments[2].outstandingAmount").value("40000.0000"))
+                .andExpect(jsonPath("$.installments[2].status").value("DUE"))
+                .andExpect(jsonPath("$.summary.totalAmount").value("120000.0000"))
+                .andExpect(jsonPath("$.summary.creditedAmount").value("0.0000"))
+                .andExpect(jsonPath("$.summary.outstandingAmount").value("120000.0000"));
     }
 
     @Test

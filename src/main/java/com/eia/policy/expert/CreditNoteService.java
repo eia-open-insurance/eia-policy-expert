@@ -18,30 +18,39 @@ import java.util.UUID;
  *
  * <p>A note is created DRAFT for the policy's premium currency. The only
  * mutations are the lifecycle transitions DRAFT -&gt; ISSUED -&gt; APPLIED and
- * DRAFT/ISSUED -&gt; CANCELLED; APPLIED and CANCELLED are terminal. The row
- * change, the policy version bump, and the matching outbox event
+ * DRAFT/ISSUED -&gt; CANCELLED; APPLIED and CANCELLED are terminal. Applying a
+ * note requires an open (DUE/OVERDUE) installment on the same tenant and
+ * policy; the note amount is credited to the installment, which becomes
+ * CREDITED when the credits cover its full amount. The row changes, the policy
+ * version bump, and the matching outbox event
  * ({@code policy.credit-note.issued}, {@code policy.credit-note.applied}, or
- * {@code policy.credit-note.cancelled}) commit in one transaction.</p>
+ * {@code policy.credit-note.cancelled}) commit in one transaction, so a failed
+ * application cannot leave a half-credited installment behind.</p>
  */
 @Service
 public class CreditNoteService {
     private final PolicyRepository policyRepository;
     private final CreditNoteRepository creditNoteRepository;
+    private final BillingRepository billingRepository;
     private final OutboxRepository outbox;
     private final Clock clock;
 
     @Autowired
     public CreditNoteService(PolicyRepository policyRepository,
                              CreditNoteRepository creditNoteRepository,
+                             BillingRepository billingRepository,
                              OutboxRepository outbox) {
-        this(policyRepository, creditNoteRepository, outbox, Clock.systemUTC());
+        this(policyRepository, creditNoteRepository, billingRepository, outbox,
+                Clock.systemUTC());
     }
 
     CreditNoteService(PolicyRepository policyRepository,
                       CreditNoteRepository creditNoteRepository,
+                      BillingRepository billingRepository,
                       OutboxRepository outbox, Clock clock) {
         this.policyRepository = policyRepository;
         this.creditNoteRepository = creditNoteRepository;
+        this.billingRepository = billingRepository;
         this.outbox = outbox;
         this.clock = clock;
     }
@@ -66,7 +75,7 @@ public class CreditNoteService {
         Instant now = Instant.now(clock).truncatedTo(ChronoUnit.MICROS);
         PolicyCreditNote creditNote = new PolicyCreditNote(UUID.randomUUID(), tenantId, policyId,
                 creditNoteRepository.nextNoteNumber(), spec.amount(), spec.currency(),
-                spec.reason(), CreditNoteRules.DRAFT, null, null, now);
+                spec.reason(), CreditNoteRules.DRAFT, null, null, null, now);
         creditNoteRepository.insert(creditNote);
         touch(policy);
         return creditNote;
@@ -76,8 +85,14 @@ public class CreditNoteService {
      * Advances a credit note once. The conditional update guards the expected
      * status; a concurrent winner (or a repeated terminal target) is a 409. The
      * ISSUED transition stamps {@code issuedAt}, APPLIED stamps
-     * {@code appliedAt}, and CANCELLED stamps neither while preserving any
-     * timestamp the note already carries.
+     * {@code appliedAt} and {@code appliedInstallmentId}, and CANCELLED stamps
+     * neither while preserving any timestamp the note already carries.
+     *
+     * <p>APPLIED is the only transition that reads an installment. The
+     * installment must be DUE/OVERDUE on this tenant and policy, and the note
+     * amount must fit in its uncredited remainder. The installment update is
+     * conditional on that remainder, so a concurrent credit can never overdraw
+     * it; the note transition rolls back with the failed installment update.</p>
      */
     @Transactional
     public PolicyCreditNote updateStatus(UUID tenantId, UUID policyId, UUID creditNoteId,
@@ -90,19 +105,51 @@ public class CreditNoteService {
             throw transitionConflict(current, target);
         }
 
+        PolicyInstallment installment = null;
+        if (CreditNoteRules.APPLIED.equals(target)) {
+            UUID installmentId = CreditNoteRules.requireInstallmentId(request.installmentId());
+            installment = billingRepository.findInstallment(tenantId, policyId, installmentId)
+                    .orElseThrow(() -> installmentNotFound(installmentId));
+            CreditNoteRules.validateApply(current, installment);
+        }
+
+        // Freeze the validated target row for the lambdas below.
+        PolicyInstallment creditInstallment = installment;
         Instant now = Instant.now(clock).truncatedTo(ChronoUnit.MICROS);
         Instant issuedAt = CreditNoteRules.ISSUED.equals(target) ? now : current.issuedAt();
         Instant appliedAt = CreditNoteRules.APPLIED.equals(target) ? now : current.appliedAt();
+        UUID appliedInstallmentId = creditInstallment == null
+                ? current.appliedInstallmentId() : creditInstallment.id();
         int rows = creditNoteRepository.updateStatus(tenantId, policyId, creditNoteId, target,
-                issuedAt, appliedAt, current.status());
+                issuedAt, appliedAt, appliedInstallmentId, current.status());
         if (rows == 0) {
             throw transitionConflict(requireCreditNote(tenantId, policyId, creditNoteId), target);
         }
 
+        if (creditInstallment != null) {
+            int credited = billingRepository.applyCredit(tenantId, creditInstallment.planId(),
+                    creditInstallment.id(), current.amount(), creditInstallment.status());
+            if (credited == 0) {
+                // The state moved under us: re-run the invariants against the
+                // current row to report the precise conflict, otherwise fall
+                // back to the generic concurrency error. The note update above
+                // rolls back either way.
+                PolicyInstallment raced = billingRepository
+                        .findInstallment(tenantId, policyId, creditInstallment.id())
+                        .orElseThrow(() -> installmentNotFound(creditInstallment.id()));
+                CreditNoteRules.validateApply(current, raced);
+                throw PolicyErrors.conflict("CONCURRENT_MODIFICATION", "installmentId",
+                        "The installment changed concurrently; reload and retry.");
+            }
+        }
+
         Policy touched = touch(policy);
         PolicyCreditNote updated = requireCreditNote(tenantId, policyId, creditNoteId);
+        PolicyInstallment updatedInstallment = creditInstallment == null ? null
+                : billingRepository.findInstallment(tenantId, policyId, creditInstallment.id())
+                        .orElseThrow(() -> installmentNotFound(creditInstallment.id()));
         outbox.insert(OutboxEvent.fromEnvelope(
-                PolicyEvents.creditNoteStatusChanged(touched, updated, now)));
+                PolicyEvents.creditNoteStatusChanged(touched, updated, updatedInstallment, now)));
         return updated;
     }
 
@@ -117,6 +164,11 @@ public class CreditNoteService {
         return creditNoteRepository.findById(tenantId, policyId, creditNoteId)
                 .orElseThrow(() -> PolicyErrors.notFound("CREDIT_NOTE_NOT_FOUND",
                         "creditNoteId", "Credit note not found: " + creditNoteId));
+    }
+
+    private static ApiException installmentNotFound(UUID installmentId) {
+        return PolicyErrors.notFound("INSTALLMENT_NOT_FOUND", "installmentId",
+                "Installment not found: " + installmentId);
     }
 
     private Policy touch(Policy policy) {

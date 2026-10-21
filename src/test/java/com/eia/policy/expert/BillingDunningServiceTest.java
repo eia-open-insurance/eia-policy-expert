@@ -69,8 +69,9 @@ class BillingDunningServiceTest {
     @BeforeEach
     void setUp() {
         for (String table : List.of(
-                "billing_dunning_action", "outbox_event", "policy_installment",
-                "policy_billing_plan", "policy_limit_erosion", "policy_limit_state",
+                "billing_dunning_action", "outbox_event", "policy_credit_note",
+                "policy_installment", "policy_billing_plan", "policy_limit_erosion",
+                "policy_limit_state",
                 "policy_limit", "policy_coverage", "policy_endorsement", "policy_insured",
                 "policy_location", "policy_cancellation", "policy_reinstatement",
                 "policy_version", "policy_command_idempotency", "policy_idempotency",

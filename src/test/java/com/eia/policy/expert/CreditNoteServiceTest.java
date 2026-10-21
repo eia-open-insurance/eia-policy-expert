@@ -37,12 +37,16 @@ class CreditNoteServiceTest {
     private static final UUID PARTY = UUID.fromString("22222222-2222-7222-8222-222222222222");
     private static final LocalDate EFFECTIVE = LocalDate.of(2026, 1, 1);
     private static final LocalDate EXPIRATION = LocalDate.of(2027, 1, 1);
+    private static final LocalDate FIRST_DUE = LocalDate.of(2026, 2, 1);
 
     @Autowired
     private CreditNoteService creditNoteService;
 
     @Autowired
     private PolicyService policyService;
+
+    @Autowired
+    private BillingService billingService;
 
     @Autowired
     private JdbcTemplate jdbc;
@@ -139,20 +143,29 @@ class CreditNoteServiceTest {
     @Test
     void applyingPreservesIssuedAtAndStampsAppliedAt() {
         Policy policy = createPolicy("POL-CN-0004", new BigDecimal("120000.00"));
+        PolicyInstallment installment = createPlan(policy).installments().getFirst();
         PolicyCreditNote note = createNote(policy, "250.00");
-        PolicyCreditNote issued = creditNoteService.updateStatus(TENANT, policy.id(), note.id(),
-                new UpdateCreditNoteStatusRequest("ISSUED"));
+        PolicyCreditNote issued = issue(policy, note);
 
-        PolicyCreditNote applied = creditNoteService.updateStatus(TENANT, policy.id(), note.id(),
-                new UpdateCreditNoteStatusRequest("APPLIED"));
+        PolicyCreditNote applied = apply(policy, note, installment.id());
 
         assertThat(applied.status()).isEqualTo("APPLIED");
         assertThat(applied.issuedAt()).isEqualTo(issued.issuedAt());
         assertThat(applied.appliedAt()).isNotNull();
         assertThat(applied.appliedAt()).isAfterOrEqualTo(applied.issuedAt());
+        assertThat(applied.appliedInstallmentId()).isEqualTo(installment.id());
+
+        PolicyInstallment credited = billingService.get(TENANT, policy.id()).installments()
+                .getFirst();
+        assertThat(credited.status()).isEqualTo("DUE");
+        assertThat(credited.creditedAmount()).isEqualByComparingTo("250.0000");
+        assertThat(credited.outstandingAmount()).isEqualByComparingTo("39750.0000");
+
         String payload = (String) event("policy.credit-note.applied", policy.id()).get("payload");
         assertThat(payload)
                 .contains("\"creditNoteId\":\"" + note.id() + "\"")
+                .contains("\"installmentId\":\"" + installment.id() + "\"")
+                .contains("\"creditedAmount\":\"250.0000\"")
                 .contains("\"status\":\"APPLIED\"");
     }
 
@@ -192,6 +205,7 @@ class CreditNoteServiceTest {
     @Test
     void rejectsDisallowedAndRepeatedTransitions() {
         Policy policy = createPolicy("POL-CN-0007", new BigDecimal("120000.00"));
+        PolicyInstallment installment = createPlan(policy).installments().getFirst();
         PolicyCreditNote note = createNote(policy, "250.00");
 
         assertConflict(() -> creditNoteService.updateStatus(TENANT, policy.id(), note.id(),
@@ -202,14 +216,12 @@ class CreditNoteServiceTest {
         assertBadRequest(() -> creditNoteService.updateStatus(TENANT, policy.id(), note.id(),
                 new UpdateCreditNoteStatusRequest("VOID")), "INVALID_CREDIT_NOTE_STATUS");
 
-        creditNoteService.updateStatus(TENANT, policy.id(), note.id(),
-                new UpdateCreditNoteStatusRequest("ISSUED"));
+        issue(policy, note);
         assertConflict(() -> creditNoteService.updateStatus(TENANT, policy.id(), note.id(),
                 new UpdateCreditNoteStatusRequest("ISSUED")),
                 "INVALID_CREDIT_NOTE_TRANSITION");
 
-        creditNoteService.updateStatus(TENANT, policy.id(), note.id(),
-                new UpdateCreditNoteStatusRequest("APPLIED"));
+        apply(policy, note, installment.id());
         assertConflict(() -> creditNoteService.updateStatus(TENANT, policy.id(), note.id(),
                 new UpdateCreditNoteStatusRequest("CANCELLED")),
                 "INVALID_CREDIT_NOTE_TRANSITION");
@@ -288,14 +300,13 @@ class CreditNoteServiceTest {
     @Test
     void writesOneDistinctEventPerAcceptedTransition() {
         Policy policy = createPolicy("POL-CN-0012", new BigDecimal("120000.00"));
+        PolicyInstallment installment = createPlan(policy).installments().getFirst();
         PolicyCreditNote first = createNote(policy, "100.00");
         PolicyCreditNote second = createNote(policy, "200.00");
-        creditNoteService.updateStatus(TENANT, policy.id(), first.id(),
-                new UpdateCreditNoteStatusRequest("ISSUED"));
+        issue(policy, first);
         creditNoteService.updateStatus(TENANT, policy.id(), second.id(),
                 new UpdateCreditNoteStatusRequest("CANCELLED"));
-        creditNoteService.updateStatus(TENANT, policy.id(), first.id(),
-                new UpdateCreditNoteStatusRequest("APPLIED"));
+        apply(policy, first, installment.id());
 
         List<Map<String, Object>> rows = jdbc.queryForList("""
                 SELECT id, event_type, aggregate_version, payload
@@ -364,6 +375,189 @@ class CreditNoteServiceTest {
         assertThat(policyService.get(TENANT, policy.id()).version()).isEqualTo(versionBefore);
     }
 
+    @Test
+    void appliesAFullCreditAndMarksTheInstallmentCredited() {
+        Policy policy = createPolicy("POL-CN-0015", new BigDecimal("120000.00"));
+        PolicyInstallment installment = createPlan(policy).installments().getFirst();
+        PolicyCreditNote note = createNote(policy, "40000.00");
+        issue(policy, note);
+
+        PolicyCreditNote applied = apply(policy, note, installment.id());
+
+        assertThat(applied.status()).isEqualTo("APPLIED");
+        assertThat(applied.appliedInstallmentId()).isEqualTo(installment.id());
+
+        PolicyInstallment credited = billingService.get(TENANT, policy.id()).installments()
+                .getFirst();
+        assertThat(credited.status()).isEqualTo("CREDITED");
+        assertThat(credited.creditedAmount()).isEqualByComparingTo("40000.0000");
+        assertThat(credited.outstandingAmount()).isEqualByComparingTo("0.0000");
+        assertThat(credited.paidAt()).isNull();
+
+        BillingPlanSummary summary = billingService.get(TENANT, policy.id()).summary();
+        assertThat(summary.totalAmount()).isEqualByComparingTo("120000.0000");
+        assertThat(summary.paidAmount()).isEqualByComparingTo("0.0000");
+        assertThat(summary.waivedAmount()).isEqualByComparingTo("0.0000");
+        assertThat(summary.creditedAmount()).isEqualByComparingTo("40000.0000");
+        assertThat(summary.outstandingAmount()).isEqualByComparingTo("80000.0000");
+
+        assertConflict(() -> apply(policy, note, installment.id()),
+                "INVALID_CREDIT_NOTE_TRANSITION");
+    }
+
+    @Test
+    void appliesPartialCreditsAndKeepsTheInstallmentOpen() {
+        Policy policy = createPolicy("POL-CN-0016", new BigDecimal("120000.00"));
+        PolicyInstallment installment = createPlan(policy).installments().getFirst();
+        PolicyCreditNote first = createNote(policy, "10000.00");
+        PolicyCreditNote second = createNote(policy, "5000.00");
+        issue(policy, first);
+        issue(policy, second);
+
+        apply(policy, first, installment.id());
+        PolicyInstallment partial = billingService.get(TENANT, policy.id()).installments()
+                .getFirst();
+        assertThat(partial.status()).isEqualTo("DUE");
+        assertThat(partial.creditedAmount()).isEqualByComparingTo("10000.0000");
+        assertThat(partial.outstandingAmount()).isEqualByComparingTo("30000.0000");
+
+        apply(policy, second, installment.id());
+        PolicyInstallment after = billingService.get(TENANT, policy.id()).installments()
+                .getFirst();
+        assertThat(after.status()).isEqualTo("DUE");
+        assertThat(after.creditedAmount()).isEqualByComparingTo("15000.0000");
+        assertThat(after.outstandingAmount()).isEqualByComparingTo("25000.0000");
+
+        String payload = (String) latestEvent("policy.credit-note.applied", policy.id())
+                .get("payload");
+        assertThat(payload)
+                .contains("\"installmentId\":\"" + installment.id() + "\"")
+                .contains("\"creditedAmount\":\"15000.0000\"");
+    }
+
+    @Test
+    void rejectsAnOverpaymentWithoutChangingTheNoteOrInstallment() {
+        Policy policy = createPolicy("POL-CN-0017", new BigDecimal("120000.00"));
+        PolicyInstallment installment = createPlan(policy).installments().getFirst();
+        PolicyCreditNote note = createNote(policy, "40000.01");
+        issue(policy, note);
+
+        assertThatThrownBy(() -> apply(policy, note, installment.id()))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException api = (ApiException) ex;
+                    assertThat(api.status()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(api.code()).isEqualTo("CREDIT_NOTE_EXCEEDS_INSTALLMENT");
+                    assertThat(api.meta())
+                            .containsEntry("availableAmount", "40000.0000")
+                            .containsEntry("noteAmount", "40000.0100");
+                });
+
+        PolicyCreditNote unchanged = creditNoteService.list(TENANT, policy.id()).getFirst();
+        assertThat(unchanged.status()).isEqualTo("ISSUED");
+        assertThat(unchanged.appliedInstallmentId()).isNull();
+        PolicyInstallment unchangedInstallment = billingService.get(TENANT, policy.id())
+                .installments().getFirst();
+        assertThat(unchangedInstallment.status()).isEqualTo("DUE");
+        assertThat(unchangedInstallment.creditedAmount()).isEqualByComparingTo("0.0000");
+        assertThat(countEvents("policy.credit-note.applied")).isZero();
+    }
+
+    @Test
+    void rejectsACreditAgainstASettledOrCreditedInstallment() {
+        Policy policy = createPolicy("POL-CN-0018", new BigDecimal("120000.00"));
+        BillingPlanView plan = createPlan(policy);
+        PolicyInstallment paidRow = plan.installments().get(0);
+        PolicyInstallment waivedRow = plan.installments().get(1);
+        billingService.updateInstallment(TENANT, policy.id(), paidRow.id(),
+                new UpdateInstallmentRequest("PAID", UUID.randomUUID()));
+        billingService.updateInstallment(TENANT, policy.id(), waivedRow.id(),
+                new UpdateInstallmentRequest("WAIVED", null));
+
+        PolicyCreditNote paidNote = createNote(policy, "100.00");
+        PolicyCreditNote waivedNote = createNote(policy, "100.00");
+        issue(policy, paidNote);
+        issue(policy, waivedNote);
+
+        assertConflict(() -> apply(policy, paidNote, paidRow.id()),
+                "INSTALLMENT_NOT_CREDITABLE");
+        assertConflict(() -> apply(policy, waivedNote, waivedRow.id()),
+                "INSTALLMENT_NOT_CREDITABLE");
+        assertThat(creditNoteService.list(TENANT, policy.id()))
+                .extracting(PolicyCreditNote::status)
+                .containsOnly("ISSUED");
+        assertThat(countEvents("policy.credit-note.applied")).isZero();
+    }
+
+    @Test
+    void rejectsAnInstallmentFromAnotherPolicyOrTenant() {
+        Policy policy = createPolicy("POL-CN-0019", new BigDecimal("120000.00"));
+        Policy otherPolicy = createPolicy("POL-CN-0020", new BigDecimal("90000.00"));
+        PolicyInstallment otherInstallment = createPlan(otherPolicy).installments().getFirst();
+        PolicyCreditNote note = createNote(policy, "100.00");
+        issue(policy, note);
+
+        assertNotFound(() -> apply(policy, note, otherInstallment.id()));
+        assertNotFound(() -> creditNoteService.updateStatus(OTHER_TENANT, policy.id(), note.id(),
+                new UpdateCreditNoteStatusRequest("APPLIED", otherInstallment.id())));
+        assertThat(creditNoteService.list(TENANT, policy.id()).getFirst().status())
+                .isEqualTo("ISSUED");
+    }
+
+    @Test
+    void requiresAnInstallmentIdWhenApplying() {
+        Policy policy = createPolicy("POL-CN-0021", new BigDecimal("120000.00"));
+        createPlan(policy);
+        PolicyCreditNote note = createNote(policy, "100.00");
+        issue(policy, note);
+
+        assertBadRequest(() -> creditNoteService.updateStatus(TENANT, policy.id(), note.id(),
+                        new UpdateCreditNoteStatusRequest("APPLIED")),
+                "INVALID_CREDIT_NOTE_INSTALLMENT");
+        assertThat(creditNoteService.list(TENANT, policy.id()).getFirst().status())
+                .isEqualTo("ISSUED");
+    }
+
+    @Test
+    void applyingRollsBackTheNoteAndInstallmentOnFailure() {
+        Policy policy = createPolicy("POL-CN-0022", new BigDecimal("120000.00"));
+        PolicyInstallment installment = createPlan(policy).installments().getFirst();
+        PolicyCreditNote note = createNote(policy, "100.00");
+        issue(policy, note);
+        int versionBefore = policyService.get(TENANT, policy.id()).version();
+
+        assertThatThrownBy(() -> transaction.executeWithoutResult(status -> {
+            creditNoteService.updateStatus(TENANT, policy.id(), note.id(),
+                    new UpdateCreditNoteStatusRequest("APPLIED", installment.id()));
+            throw new IllegalStateException("force rollback");
+        })).isInstanceOf(IllegalStateException.class)
+                .hasMessage("force rollback");
+
+        assertThat(creditNoteService.list(TENANT, policy.id()).getFirst().status())
+                .isEqualTo("ISSUED");
+        PolicyInstallment stored = billingService.get(TENANT, policy.id()).installments()
+                .getFirst();
+        assertThat(stored.creditedAmount()).isEqualByComparingTo("0.0000");
+        assertThat(stored.status()).isEqualTo("DUE");
+        assertThat(countEvents("policy.credit-note.applied")).isZero();
+        assertThat(policyService.get(TENANT, policy.id()).version()).isEqualTo(versionBefore);
+    }
+
+    private BillingPlanView createPlan(Policy policy) {
+        return billingService.create(TENANT, policy.id(),
+                new CreateBillingPlanRequest(3, "MONTHLY", FIRST_DUE));
+    }
+
+    private PolicyCreditNote issue(Policy policy, PolicyCreditNote note) {
+        return creditNoteService.updateStatus(TENANT, policy.id(), note.id(),
+                new UpdateCreditNoteStatusRequest("ISSUED"));
+    }
+
+    private PolicyCreditNote apply(Policy policy, PolicyCreditNote note, UUID installmentId) {
+        return creditNoteService.updateStatus(TENANT, policy.id(), note.id(),
+                new UpdateCreditNoteStatusRequest("APPLIED", installmentId));
+    }
+
     private Policy createPolicy(String number, BigDecimal premium) {
         return policyService.create(new CreatePolicyRequest(TENANT, number, "CGL", PARTY, null,
                 EFFECTIVE, EXPIRATION, premium, "USD", new BigDecimal("5000000.00"), "USD"));
@@ -379,6 +573,16 @@ class CreditNoteServiceTest {
                 SELECT aggregate_type, aggregate_version, status, payload, headers
                   FROM outbox_event
                  WHERE aggregate_id = ? AND event_type = ?
+                """, policyId, eventType);
+    }
+
+    private Map<String, Object> latestEvent(String eventType, UUID policyId) {
+        return jdbc.queryForMap("""
+                SELECT aggregate_type, aggregate_version, status, payload, headers
+                  FROM outbox_event
+                 WHERE aggregate_id = ? AND event_type = ?
+                 ORDER BY event_sequence DESC
+                 LIMIT 1
                 """, policyId, eventType);
     }
 

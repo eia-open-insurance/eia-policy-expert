@@ -98,9 +98,14 @@ final class PolicyEvents {
      * carries the policy and note identifiers, the money value, and the new
      * status. The policy version advances with the transition, so every event
      * gets a distinct {@code aggregateVersion}.
+     *
+     * <p>An APPLIED event also carries {@code installmentId} and the
+     * installment's cumulative {@code creditedAmount} after the application, so
+     * a receivables consumer can update the open installment without a second
+     * read. ISSUED and CANCELLED events never name an installment.</p>
      */
     static EventEnvelope creditNoteStatusChanged(Policy policy, PolicyCreditNote creditNote,
-                                                 Instant now) {
+                                                 PolicyInstallment installment, Instant now) {
         Objects.requireNonNull(creditNote, "creditNote");
         String eventType = switch (creditNote.status()) {
             case CreditNoteRules.ISSUED -> CREDIT_NOTE_ISSUED;
@@ -117,7 +122,19 @@ final class PolicyEvents {
         data.put("amount", money(creditNote.amount()));
         data.put("currency", creditNote.currency());
         data.put("status", creditNote.status());
+        if (CreditNoteRules.APPLIED.equals(creditNote.status())) {
+            Objects.requireNonNull(installment,
+                    "An APPLIED credit note event requires the credited installment");
+            data.put("installmentId", installment.id());
+            data.put("creditedAmount", money(installment.creditedAmount()));
+        }
         return envelope(policy, eventType, data, now);
+    }
+
+    /** Compatibility form for transitions that do not name an installment. */
+    static EventEnvelope creditNoteStatusChanged(Policy policy, PolicyCreditNote creditNote,
+                                                 Instant now) {
+        return creditNoteStatusChanged(policy, creditNote, null, now);
     }
 
     /**

@@ -41,7 +41,10 @@ contract structures from SPEC 11.2:
   approval and documented premium evidence.
 - `policy_billing_plan` and `policy_installment`: one ACTIVE plan per policy,
   an equal premium split across 1..24 installments with the rounding remainder
-  on the last row, and PAID/WAIVED settlement.
+  on the last row, PAID/WAIVED settlement, and credit application through
+  `credited_amount` with a CREDITED terminal status once credits cover the
+  gross amount. Each read carries `creditedAmount` and `outstandingAmount`, and
+  the plan read includes a paid/waived/credited/outstanding summary.
 - `billing_dunning_action`: one reminder/notice/collections action per
   installment and escalation level, with channel, notes, status, and sent time.
   The unique `(tenant_id, installment_id, level)` key is the duplicate-send
@@ -50,7 +53,8 @@ contract structures from SPEC 11.2:
   `numeric(19,4)` amount in the policy currency, an optional 500-character
   reason, a per-policy unique `note_number`, and the DRAFT/ISSUED/APPLIED/
   CANCELLED lifecycle with `issued_at`/`applied_at` stamped by the transition
-  that reaches each state.
+  that reaches each state. `applied_installment_id` names the open installment
+  an APPLIED note was credited against.
 - `policy_mass_tort_profile`: one profile per policy carrying the tort type,
   trigger theory, allocation method/notes, an inclusive coverage block, and
   DRAFT/COMPLETE status. A COMPLETE profile requires the notes and both block
@@ -127,13 +131,19 @@ controller keeps the `/internal/v1` alias for the domain adapter):
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/api/v1/policies/{policyId}/billing` | ACTIVE (else latest) plan and its installments; `404` when none |
+| `GET` | `/api/v1/policies/{policyId}/billing` | ACTIVE (else latest) plan, its installments, and the money summary; `404` when none |
 | `POST` | `/api/v1/policies/{policyId}/billing` | Create the plan and split the policy premium; `201`, `409` when an ACTIVE plan exists |
-| `PATCH` | `/api/v1/policies/{policyId}/billing/installments/{installmentId}` | Settle as `PAID` or `WAIVED`; same-status replay is a no-op, terminal-status switch is `409` |
+| `PATCH` | `/api/v1/policies/{policyId}/billing/installments/{installmentId}` | Settle as `PAID` or `WAIVED`; same-status replay is a no-op, terminal-status (including `CREDITED`) switch is `409` |
 
-The plan response is `{"plan": {...}, "installments": [...]}`. Plan creation
-and settlement bump the policy aggregate version, so every billing outbox event
-has a distinct `aggregateVersion`.
+The plan response is `{"plan": {...}, "installments": [...], "summary": {...}}`.
+Each installment carries the gross `amount`, the applied `creditedAmount`, and
+the derived `outstandingAmount` (zero once PAID, WAIVED, or CREDITED). The
+summary carries `totalAmount`, `paidAmount`, `waivedAmount`, `creditedAmount`,
+`outstandingAmount`, `overdueAmount`, `currency`, and `installmentCount`;
+`outstandingAmount` sums the installment remainders, so waived and fully
+credited rows never contribute. Plan creation, settlement, and credit
+application bump the policy aggregate version, so every billing outbox event has
+a distinct `aggregateVersion`.
 
 Dunning is exposed under the tenant-wide billing path (the same controller keeps
 the `/internal/v1` alias for the domain adapter):
@@ -232,11 +242,25 @@ characters. The tenant comes from `?tenantId=` or `X-EIA-Tenant`, and the route
 is fixed to the DIRECT book. A new note is `DRAFT`; `DRAFT` may move to `ISSUED`
 or `CANCELLED`, `ISSUED` may move to `APPLIED` or `CANCELLED`, and `APPLIED` /
 `CANCELLED` are terminal. `ISSUED` stamps `issuedAt`, `APPLIED` stamps
-`appliedAt`, and `CANCELLED` stamps neither. Every accepted transition bumps the
-policy aggregate version and writes `policy.credit-note.issued`,
-`policy.credit-note.applied`, or `policy.credit-note.cancelled` (`policyId`,
-`policyNumber`, `creditNoteId`, `noteNumber`, `amount`, `currency`, `status`) in
-the same transaction.
+`appliedAt` and `appliedInstallmentId`, and `CANCELLED` stamps neither.
+
+The status body is `{status, installmentId?}`. `installmentId` is required for
+`APPLIED`: the installment must belong to the same tenant and policy, still be
+`DUE` or `OVERDUE`, and its uncredited remainder (`amount - creditedAmount`)
+must cover the note amount. Applying adds the note amount to
+`policy_installment.credited_amount`; the installment becomes `CREDITED` when
+the credits reach the gross amount and stays open after a partial credit.
+Overpayment is `409 CREDIT_NOTE_EXCEEDS_INSTALLMENT`, a settled/credited target
+is `409 INSTALLMENT_NOT_CREDITABLE`, and a missing `installmentId` is
+`400 INVALID_CREDIT_NOTE_INSTALLMENT`. `ISSUED` and `CANCELLED` ignore the
+optional field.
+
+Every accepted transition bumps the policy aggregate version and writes
+`policy.credit-note.issued`, `policy.credit-note.applied`, or
+`policy.credit-note.cancelled` (`policyId`, `policyNumber`, `creditNoteId`,
+`noteNumber`, `amount`, `currency`, `status`) in the same transaction. The
+`applied` event additionally carries `installmentId` and the installment's
+cumulative `creditedAmount` after the application.
 
 The tenant-wide premium receivables worklist is
 `GET /api/v1/billing/installments` (also exposed under
@@ -253,12 +277,16 @@ the DIRECT book: a missing `X-EIA-Book` is treated as DIRECT and another book is
 `404`. The response is `{items, totalAmount, overdueAmount, count}` with items
 ordered by `due_date ASC, policy_number ASC, installment_number ASC`. Each item
 joins the plan, policy, and installment so it carries `planNumber`,
-`policyNumber`, and `insuredPartyId`. Overdue is derived at read time: a stored
-`DUE` installment past its due date is returned as `OVERDUE` with
-`daysPastDue > 0`, and the stored row is never mutated. Each item also carries
-`lastDunningLevel` and `lastDunningAt` from the latest `SENT` dunning action
-for the installment (both `null` when it has never been dunned; cancelled
-history is ignored).
+`policyNumber`, and `insuredPartyId`. Only open (`DUE`/`OVERDUE`) installments
+are returned: PAID, WAIVED, and fully CREDITED rows are excluded. Each item keeps
+`amount` gross and carries `creditedAmount` plus the collectible
+`outstandingAmount` (`amount - creditedAmount`); both `totalAmount` and
+`overdueAmount` sum the outstanding amount, so applied credits reduce what the
+queue expects to collect. Overdue is derived at read time: a stored `DUE`
+installment past its due date is returned as `OVERDUE` with `daysPastDue > 0`,
+and the stored row is never mutated. Each item also carries `lastDunningLevel`
+and `lastDunningAt` from the latest `SENT` dunning action for the installment
+(both `null` when it has never been dunned; cancelled history is ignored).
 
 ## Cross-cutting API behavior
 

@@ -133,6 +133,53 @@ class CreditNoteRulesTest {
                 "INVALID_CREDIT_NOTE");
     }
 
+    @Test
+    void applyingRequiresAnInstallmentAndAnOpenRow() {
+        assertBadRequest(() -> CreditNoteRules.requireInstallmentId(null),
+                "INVALID_CREDIT_NOTE_INSTALLMENT");
+        assertThat(CreditNoteRules.requireInstallmentId(POLICY_ID)).isEqualTo(POLICY_ID);
+
+        assertConflict(() -> CreditNoteRules.validateApply(note("100.00"),
+                        installment("1000.0000", "0.0000", BillingRules.PAID)),
+                "INSTALLMENT_NOT_CREDITABLE");
+        assertConflict(() -> CreditNoteRules.validateApply(note("100.00"),
+                        installment("1000.0000", "0.0000", BillingRules.WAIVED)),
+                "INSTALLMENT_NOT_CREDITABLE");
+        assertConflict(() -> CreditNoteRules.validateApply(note("100.00"),
+                        installment("1000.0000", "1000.0000", BillingRules.CREDITED)),
+                "INSTALLMENT_NOT_CREDITABLE");
+    }
+
+    @Test
+    void applyingRejectsAnAmountAboveTheUncreditedRemainder() {
+        assertConflict(() -> CreditNoteRules.validateApply(note("600.01"),
+                        installment("1000.0000", "400.0000", BillingRules.DUE)),
+                "CREDIT_NOTE_EXCEEDS_INSTALLMENT");
+        assertThat(CreditNoteRules.creditedAfter(
+                installment("1000.0000", "400.0000", BillingRules.DUE),
+                new BigDecimal("600.00"))).isEqualByComparingTo("1000.0000");
+        assertThat(CreditNoteRules.statusAfterCredit(
+                installment("1000.0000", "400.0000", BillingRules.OVERDUE),
+                new BigDecimal("600.00"))).isEqualTo(BillingRules.CREDITED);
+        assertThat(CreditNoteRules.statusAfterCredit(
+                installment("1000.0000", "400.0000", BillingRules.DUE),
+                new BigDecimal("100.00"))).isEqualTo(BillingRules.DUE);
+    }
+
+    private static PolicyCreditNote note(String amount) {
+        Instant now = Instant.parse("2026-01-01T00:00:00Z");
+        return new PolicyCreditNote(UUID.randomUUID(), TENANT, POLICY_ID, "CN-0000001",
+                new BigDecimal(amount), "USD", null, CreditNoteRules.ISSUED, now, null, null, now);
+    }
+
+    private static PolicyInstallment installment(String amount, String creditedAmount,
+                                                 String status) {
+        return new PolicyInstallment(UUID.randomUUID(), TENANT, POLICY_ID, 1,
+                LocalDate.of(2026, 2, 1), new BigDecimal(amount),
+                new BigDecimal(creditedAmount), status, null, null,
+                Instant.parse("2026-01-01T00:00:00Z"));
+    }
+
     private static Policy policy() {
         Instant now = Instant.parse("2026-01-01T00:00:00Z");
         return new Policy(POLICY_ID, TENANT, "POL-2026-0000001", "CGL", UUID.randomUUID(),
@@ -145,6 +192,14 @@ class CreditNoteRulesTest {
         assertThatThrownBy(call::run).isInstanceOf(ApiException.class).satisfies(ex -> {
             ApiException api = (ApiException) ex;
             assertThat(api.status()).isEqualTo(HttpStatus.BAD_REQUEST);
+            assertThat(api.code()).isEqualTo(code);
+        });
+    }
+
+    private static void assertConflict(ThrowingCall call, String code) {
+        assertThatThrownBy(call::run).isInstanceOf(ApiException.class).satisfies(ex -> {
+            ApiException api = (ApiException) ex;
+            assertThat(api.status()).isEqualTo(HttpStatus.CONFLICT);
             assertThat(api.code()).isEqualTo(code);
         });
     }

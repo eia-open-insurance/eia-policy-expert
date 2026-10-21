@@ -28,6 +28,8 @@ class CreditNoteControllerTest {
     private static final UUID TENANT = UUID.fromString("11111111-1111-7111-8111-111111111111");
     private static final UUID POLICY_ID = UUID.fromString("33333333-3333-7333-8333-333333333333");
     private static final UUID NOTE_ID = UUID.fromString("77777777-7777-7777-8777-777777777777");
+    private static final UUID INSTALLMENT_ID =
+            UUID.fromString("55555555-5555-7555-8555-555555555555");
     private static final Instant CREATED = Instant.parse("2026-01-15T10:00:00Z");
 
     @Autowired
@@ -129,6 +131,24 @@ class CreditNoteControllerTest {
     }
 
     @Test
+    void acceptsTheInstallmentIdWhenApplying() throws Exception {
+        when(service.updateStatus(eq(TENANT), eq(POLICY_ID), eq(NOTE_ID),
+                any(UpdateCreditNoteStatusRequest.class)))
+                .thenReturn(note("APPLIED", CREATED, CREATED, INSTALLMENT_ID));
+
+        mvc.perform(patch("/api/v1/policies/{policyId}/credit-notes/{creditNoteId}/status",
+                        POLICY_ID, NOTE_ID)
+                        .param("tenantId", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"status":"APPLIED","installmentId":"%s"}
+                                """.formatted(INSTALLMENT_ID)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("APPLIED"))
+                .andExpect(jsonPath("$.appliedInstallmentId").value(INSTALLMENT_ID.toString()));
+    }
+
+    @Test
     void validatesTheStatusBody() throws Exception {
         mvc.perform(patch("/api/v1/policies/{policyId}/credit-notes/{creditNoteId}/status",
                         POLICY_ID, NOTE_ID)
@@ -198,8 +218,13 @@ class CreditNoteControllerTest {
     }
 
     private static PolicyCreditNote note(String status, Instant issuedAt, Instant appliedAt) {
+        return note(status, issuedAt, appliedAt, null);
+    }
+
+    private static PolicyCreditNote note(String status, Instant issuedAt, Instant appliedAt,
+                                         UUID appliedInstallmentId) {
         return new PolicyCreditNote(NOTE_ID, TENANT, POLICY_ID, "CN-0000001",
                 new BigDecimal("1500.5000"), "USD", "adjustment", status, issuedAt, appliedAt,
-                CREATED);
+                appliedInstallmentId, CREATED);
     }
 }

@@ -22,7 +22,7 @@ import java.util.UUID;
 public class CreditNoteRepository {
     private static final String SELECT_COLUMNS = """
             SELECT id, tenant_id, policy_id, note_number, amount, currency, reason, status,
-                   issued_at, applied_at, created_at
+                   issued_at, applied_at, applied_installment_id, created_at
               FROM policy_credit_note
             """;
 
@@ -40,6 +40,7 @@ public class CreditNoteRepository {
                 rs.getString("status"),
                 issuedAt == null ? null : issuedAt.toInstant(),
                 appliedAt == null ? null : appliedAt.toInstant(),
+                rs.getObject("applied_installment_id", UUID.class),
                 rs.getTimestamp("created_at").toInstant()
         );
     };
@@ -71,29 +72,34 @@ public class CreditNoteRepository {
         jdbc.update("""
                 INSERT INTO policy_credit_note
                        (id, tenant_id, policy_id, note_number, amount, currency, reason, status,
-                        issued_at, applied_at, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        issued_at, applied_at, applied_installment_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, creditNote.id(), creditNote.tenantId(), creditNote.policyId(),
                 creditNote.noteNumber(), creditNote.amount(), creditNote.currency(),
                 creditNote.reason(), creditNote.status(),
                 creditNote.issuedAt() == null ? null : Timestamp.from(creditNote.issuedAt()),
                 creditNote.appliedAt() == null ? null : Timestamp.from(creditNote.appliedAt()),
+                creditNote.appliedInstallmentId(),
                 Timestamp.from(creditNote.createdAt()));
     }
 
     /**
      * Conditional transition: only a row still at {@code expectedStatus} is
-     * updated. A concurrent winner makes this return zero.
+     * updated. A concurrent winner makes this return zero. The applied
+     * installment id is written by the APPLIED transition and stays null for
+     * ISSUED/CANCELLED.
      */
     public int updateStatus(UUID tenantId, UUID policyId, UUID creditNoteId, String status,
-                            Instant issuedAt, Instant appliedAt, String expectedStatus) {
+                            Instant issuedAt, Instant appliedAt, UUID appliedInstallmentId,
+                            String expectedStatus) {
         return jdbc.update("""
                 UPDATE policy_credit_note
-                   SET status = ?, issued_at = ?, applied_at = ?
+                   SET status = ?, issued_at = ?, applied_at = ?, applied_installment_id = ?
                  WHERE tenant_id = ? AND policy_id = ? AND id = ? AND status = ?
                 """, status,
                 issuedAt == null ? null : Timestamp.from(issuedAt),
                 appliedAt == null ? null : Timestamp.from(appliedAt),
+                appliedInstallmentId,
                 tenantId, policyId, creditNoteId, expectedStatus);
     }
 

@@ -4,6 +4,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
 
+import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -41,21 +42,26 @@ public class BillingRepository {
             );
 
     private static final String INSTALLMENT_COLUMNS = """
-            SELECT id, tenant_id, plan_id, installment_number, due_date, amount, status,
-                   paid_at, payment_id, created_at
+            SELECT id, tenant_id, plan_id, installment_number, due_date, amount,
+                   credited_amount, status, paid_at, payment_id, created_at
               FROM policy_installment
             """;
 
     private static final RowMapper<PolicyInstallment> INSTALLMENT_MAPPER = (rs, rowNum) -> {
         Timestamp paidAt = rs.getTimestamp("paid_at");
+        BigDecimal amount = rs.getBigDecimal("amount");
+        BigDecimal creditedAmount = rs.getBigDecimal("credited_amount");
+        String status = rs.getString("status");
         return new PolicyInstallment(
                 rs.getObject("id", UUID.class),
                 rs.getObject("tenant_id", UUID.class),
                 rs.getObject("plan_id", UUID.class),
                 rs.getInt("installment_number"),
                 rs.getObject("due_date", LocalDate.class),
-                rs.getBigDecimal("amount"),
-                rs.getString("status"),
+                amount,
+                creditedAmount,
+                BillingRules.outstandingAmount(amount, creditedAmount, status),
+                status,
                 paidAt == null ? null : paidAt.toInstant(),
                 rs.getObject("payment_id", UUID.class),
                 rs.getTimestamp("created_at").toInstant()
@@ -75,6 +81,7 @@ public class BillingRepository {
                 rs.getInt("installment_number"),
                 rs.getObject("due_date", LocalDate.class),
                 rs.getBigDecimal("amount"),
+                rs.getBigDecimal("credited_amount"),
                 rs.getString("currency"),
                 rs.getString("status"),
                 paidAt == null ? null : paidAt.toInstant(),
@@ -104,12 +111,12 @@ public class BillingRepository {
     public void insertInstallment(PolicyInstallment installment) {
         jdbc.update("""
                 INSERT INTO policy_installment
-                       (id, tenant_id, plan_id, installment_number, due_date, amount, status,
-                        paid_at, payment_id, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       (id, tenant_id, plan_id, installment_number, due_date, amount,
+                        credited_amount, status, paid_at, payment_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, installment.id(), installment.tenantId(), installment.planId(),
                 installment.installmentNumber(), installment.dueDate(), installment.amount(),
-                installment.status(),
+                installment.creditedAmount(), installment.status(),
                 installment.paidAt() == null ? null : Timestamp.from(installment.paidAt()),
                 installment.paymentId(), Timestamp.from(installment.createdAt()));
     }
@@ -148,22 +155,23 @@ public class BillingRepository {
     }
 
     /**
-     * Tenant-wide outstanding installments for the receivables worklist. The
-     * plan and policy joins carry the plan number, policy number, and insured
-     * party; all three tenant columns are checked so a mismatched row can never
-     * leak across tenants. The optional status filter is applied to the
-     * effective status (a stored DUE row past its due date counts as OVERDUE),
-     * and {@code dueBefore} is an inclusive cutoff. The dunning columns are the
-     * latest SENT action for the installment; CANCELLED history is ignored and
-     * correlation is scoped to the installment's own tenant.
+     * Tenant-wide open installments for the receivables worklist. Only DUE and
+     * OVERDUE rows are collectible, so fully CREDITED (and PAID/WAIVED) rows are
+     * excluded. The plan and policy joins carry the plan number, policy number,
+     * and insured party; all three tenant columns are checked so a mismatched row
+     * can never leak across tenants. The optional status filter is applied to
+     * the effective status (a stored DUE row past its due date counts as
+     * OVERDUE), and {@code dueBefore} is an inclusive cutoff. The dunning
+     * columns are the latest SENT action for the installment; CANCELLED history
+     * is ignored and correlation is scoped to the installment's own tenant.
      */
     public List<ReceivableRow> findReceivables(UUID tenantId, String status, LocalDate today,
                                                LocalDate dueBefore, int limit) {
         StringBuilder sql = new StringBuilder("""
                 SELECT i.id AS installment_id, p.id AS plan_id, p.plan_number,
                        pol.id AS policy_id, pol.policy_number, pol.insured_party_id,
-                       i.installment_number, i.due_date, i.amount, p.currency,
-                       i.status, i.paid_at, i.payment_id,
+                       i.installment_number, i.due_date, i.amount, i.credited_amount,
+                       p.currency, i.status, i.paid_at, i.payment_id,
                        (SELECT d.level
                           FROM billing_dunning_action d
                          WHERE d.tenant_id = i.tenant_id AND d.installment_id = i.id
@@ -218,13 +226,34 @@ public class BillingRepository {
                                                        UUID installmentId) {
         return jdbc.query("""
                         SELECT i.id, i.tenant_id, i.plan_id, i.installment_number, i.due_date,
-                               i.amount, i.status, i.paid_at, i.payment_id, i.created_at
+                               i.amount, i.credited_amount, i.status, i.paid_at, i.payment_id,
+                               i.created_at
                           FROM policy_installment i
                           JOIN policy_billing_plan p ON p.id = i.plan_id
                          WHERE i.tenant_id = ? AND p.tenant_id = ? AND p.policy_id = ?
                            AND i.id = ?
                         """, INSTALLMENT_MAPPER, tenantId, tenantId, policyId, installmentId)
                 .stream().findFirst();
+    }
+
+    /**
+     * Applies one credit note amount to an open installment. The conditional
+     * WHERE is the concurrency arbiter: the row must still be DUE/OVERDUE and
+     * the uncredited remainder must still cover the note. The CASE sets
+     * CREDITED exactly when the credits reach the gross amount. A concurrent
+     * winner makes this return zero and the caller rolls the note transition
+     * back.
+     */
+    public int applyCredit(UUID tenantId, UUID planId, UUID installmentId, BigDecimal amount,
+                           String expectedStatus) {
+        return jdbc.update("""
+                UPDATE policy_installment
+                   SET credited_amount = credited_amount + ?,
+                       status = CASE WHEN credited_amount + ? >= amount
+                                     THEN 'CREDITED' ELSE status END
+                 WHERE tenant_id = ? AND plan_id = ? AND id = ? AND status = ?
+                   AND credited_amount + ? <= amount
+                """, amount, amount, tenantId, planId, installmentId, expectedStatus, amount);
     }
 
     /**

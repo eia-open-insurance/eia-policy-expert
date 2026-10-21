@@ -60,7 +60,8 @@ class BillingServiceTest {
     void clean() {
         transaction = new TransactionTemplate(transactionManager);
         for (String table : List.of(
-                "outbox_event", "policy_installment", "policy_billing_plan",
+                "outbox_event", "policy_credit_note", "policy_installment",
+                "policy_billing_plan",
                 "policy_limit_erosion", "policy_limit_state", "policy_limit",
                 "policy_coverage", "policy_endorsement", "policy_insured", "policy_location",
                 "policy_cancellation", "policy_reinstatement", "policy_version",
@@ -100,7 +101,18 @@ class BillingServiceTest {
             assertThat(installment.status()).isEqualTo("DUE");
             assertThat(installment.paidAt()).isNull();
             assertThat(installment.paymentId()).isNull();
+            assertThat(installment.creditedAmount()).isEqualByComparingTo("0.0000");
+            assertThat(installment.outstandingAmount())
+                    .isEqualByComparingTo(installment.amount());
         });
+
+        assertThat(view.summary().totalAmount()).isEqualByComparingTo("100000.0000");
+        assertThat(view.summary().paidAmount()).isEqualByComparingTo("0.0000");
+        assertThat(view.summary().waivedAmount()).isEqualByComparingTo("0.0000");
+        assertThat(view.summary().creditedAmount()).isEqualByComparingTo("0.0000");
+        assertThat(view.summary().outstandingAmount()).isEqualByComparingTo("100000.0000");
+        assertThat(view.summary().currency()).isEqualTo("USD");
+        assertThat(view.summary().installmentCount()).isEqualTo(3);
 
         assertThat(policyService.get(TENANT, policy.id()).version()).isEqualTo(policy.version() + 1);
     }
@@ -158,6 +170,9 @@ class BillingServiceTest {
         assertThat(paid.paidAt()).isNotNull();
         assertThat(paid.paymentId()).isEqualTo(PAYMENT);
         assertThat(paid.amount()).isEqualByComparingTo("40000.0000");
+        assertThat(paid.outstandingAmount()).isEqualByComparingTo("0.0000");
+        assertThat(billingService.get(TENANT, policy.id()).summary().paidAmount())
+                .isEqualByComparingTo("40000.0000");
 
         Map<String, Object> event = event("policy.installment.paid", policy.id());
         assertThat(event.get("aggregate_type")).isEqualTo("Policy");
@@ -191,6 +206,11 @@ class BillingServiceTest {
         assertThat(waived.status()).isEqualTo("WAIVED");
         assertThat(waived.paidAt()).isNull();
         assertThat(waived.paymentId()).isNull();
+        assertThat(waived.outstandingAmount()).isEqualByComparingTo("0.0000");
+
+        BillingPlanSummary summary = billingService.get(TENANT, policy.id()).summary();
+        assertThat(summary.waivedAmount()).isEqualByComparingTo("60000.0000");
+        assertThat(summary.outstandingAmount()).isEqualByComparingTo("60000.0000");
 
         String payload = (String) event("policy.installment.waived", policy.id()).get("payload");
         assertThat(payload)

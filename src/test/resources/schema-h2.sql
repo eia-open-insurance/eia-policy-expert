@@ -447,6 +447,7 @@ CREATE TABLE IF NOT EXISTS policy_installment (
     installment_number INTEGER NOT NULL,
     due_date DATE NOT NULL,
     amount NUMERIC(19,4) NOT NULL,
+    credited_amount NUMERIC(19,4) NOT NULL DEFAULT 0,
     status VARCHAR(16) NOT NULL DEFAULT 'DUE',
     paid_at TIMESTAMP WITH TIME ZONE,
     payment_id UUID,
@@ -454,9 +455,22 @@ CREATE TABLE IF NOT EXISTS policy_installment (
     CONSTRAINT uq_policy_installment_number UNIQUE (plan_id, installment_number),
     CONSTRAINT ck_policy_installment_number CHECK (installment_number >= 1),
     CONSTRAINT ck_policy_installment_amount CHECK (amount >= 0),
+    CONSTRAINT ck_policy_installment_credited
+        CHECK (credited_amount >= 0 AND credited_amount <= amount),
     CONSTRAINT ck_policy_installment_status
-        CHECK (status IN ('DUE', 'PAID', 'OVERDUE', 'WAIVED'))
+        CHECK (status IN ('DUE', 'PAID', 'OVERDUE', 'WAIVED', 'CREDITED'))
 );
+
+-- H2-compatible copy of the forward migration: H2 accepts the same
+-- ADD COLUMN IF NOT EXISTS and DROP/ADD CONSTRAINT forms.
+ALTER TABLE policy_installment
+    ADD COLUMN IF NOT EXISTS credited_amount NUMERIC(19,4) NOT NULL DEFAULT 0;
+ALTER TABLE policy_installment DROP CONSTRAINT IF EXISTS ck_policy_installment_credited;
+ALTER TABLE policy_installment ADD CONSTRAINT ck_policy_installment_credited
+    CHECK (credited_amount >= 0 AND credited_amount <= amount);
+ALTER TABLE policy_installment DROP CONSTRAINT IF EXISTS ck_policy_installment_status;
+ALTER TABLE policy_installment ADD CONSTRAINT ck_policy_installment_status
+    CHECK (status IN ('DUE', 'PAID', 'OVERDUE', 'WAIVED', 'CREDITED'));
 
 CREATE INDEX IF NOT EXISTS idx_policy_installment_plan
     ON policy_installment (tenant_id, plan_id, installment_number);
@@ -506,6 +520,7 @@ CREATE TABLE IF NOT EXISTS policy_credit_note (
     status VARCHAR(16) NOT NULL DEFAULT 'DRAFT',
     issued_at TIMESTAMP WITH TIME ZONE,
     applied_at TIMESTAMP WITH TIME ZONE,
+    applied_installment_id UUID,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL,
     CONSTRAINT uq_policy_credit_note_number UNIQUE (policy_id, note_number),
     CONSTRAINT ck_policy_credit_note_amount CHECK (amount > 0),
@@ -519,8 +534,13 @@ CREATE TABLE IF NOT EXISTS policy_credit_note (
         CHECK (status <> 'APPLIED' OR applied_at IS NOT NULL)
 );
 
+ALTER TABLE policy_credit_note
+    ADD COLUMN IF NOT EXISTS applied_installment_id UUID;
+
 CREATE INDEX IF NOT EXISTS idx_policy_credit_note_policy
     ON policy_credit_note (tenant_id, policy_id, created_at DESC, note_number DESC);
+CREATE INDEX IF NOT EXISTS idx_policy_credit_note_installment
+    ON policy_credit_note (tenant_id, applied_installment_id);
 
 -- H2-compatible copy of the mass tort profile table. The unique policy_id is
 -- the upsert arbiter and the CHECK constraints mirror the PostgreSQL DDL.

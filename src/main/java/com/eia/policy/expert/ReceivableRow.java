@@ -9,9 +9,10 @@ import java.util.UUID;
  * One tenant-scoped receivable row joined from the installment, billing plan,
  * and policy tables. {@code storedStatus} is the persisted installment status;
  * the response derives the effective overdue status from the due date instead
- * of mutating the row. {@code lastDunningLevel} and {@code lastDunningAt} are
- * the latest SENT dunning action for the installment, or null when it has never
- * been dunned.
+ * of mutating the row. {@code amount} is the gross scheduled amount and
+ * {@code creditedAmount} is the sum of applied credit notes.
+ * {@code lastDunningLevel} and {@code lastDunningAt} are the latest SENT dunning
+ * action for the installment, or null when it has never been dunned.
  */
 record ReceivableRow(
         UUID installmentId,
@@ -23,6 +24,7 @@ record ReceivableRow(
         int installmentNumber,
         LocalDate dueDate,
         BigDecimal amount,
+        BigDecimal creditedAmount,
         String currency,
         String storedStatus,
         Instant paidAt,

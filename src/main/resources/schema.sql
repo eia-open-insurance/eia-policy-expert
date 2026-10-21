@@ -500,7 +500,9 @@ CREATE INDEX IF NOT EXISTS idx_policy_billing_plan_policy
 
 -- Scheduled installments of a billing plan. (plan_id, installment_number) is
 -- unique, so a retried create cannot double-book a due date. The tenant column
--- is carried for the tenant wall and partition keys.
+-- is carried for the tenant wall and partition keys. credited_amount
+-- accumulates applied credit notes; the installment becomes CREDITED once the
+-- credits cover the full amount (SPEC BIL-06).
 CREATE TABLE IF NOT EXISTS policy_installment (
     id UUID PRIMARY KEY,
     tenant_id UUID NOT NULL,
@@ -508,6 +510,7 @@ CREATE TABLE IF NOT EXISTS policy_installment (
     installment_number INTEGER NOT NULL,
     due_date DATE NOT NULL,
     amount NUMERIC(19,4) NOT NULL,
+    credited_amount NUMERIC(19,4) NOT NULL DEFAULT 0,
     status VARCHAR(16) NOT NULL DEFAULT 'DUE',
     paid_at TIMESTAMPTZ,
     payment_id UUID,
@@ -515,9 +518,23 @@ CREATE TABLE IF NOT EXISTS policy_installment (
     CONSTRAINT uq_policy_installment_number UNIQUE (plan_id, installment_number),
     CONSTRAINT ck_policy_installment_number CHECK (installment_number >= 1),
     CONSTRAINT ck_policy_installment_amount CHECK (amount >= 0),
+    CONSTRAINT ck_policy_installment_credited
+        CHECK (credited_amount >= 0 AND credited_amount <= amount),
     CONSTRAINT ck_policy_installment_status
-        CHECK (status IN ('DUE', 'PAID', 'OVERDUE', 'WAIVED'))
+        CHECK (status IN ('DUE', 'PAID', 'OVERDUE', 'WAIVED', 'CREDITED'))
 );
+
+-- Credit application is an additive, forward-only migration. PostgreSQL has no
+-- ADD CONSTRAINT IF NOT EXISTS, so the status check is dropped and re-added to
+-- admit CREDITED on an already-migrated database.
+ALTER TABLE policy_installment
+    ADD COLUMN IF NOT EXISTS credited_amount NUMERIC(19,4) NOT NULL DEFAULT 0;
+ALTER TABLE policy_installment DROP CONSTRAINT IF EXISTS ck_policy_installment_credited;
+ALTER TABLE policy_installment ADD CONSTRAINT ck_policy_installment_credited
+    CHECK (credited_amount >= 0 AND credited_amount <= amount);
+ALTER TABLE policy_installment DROP CONSTRAINT IF EXISTS ck_policy_installment_status;
+ALTER TABLE policy_installment ADD CONSTRAINT ck_policy_installment_status
+    CHECK (status IN ('DUE', 'PAID', 'OVERDUE', 'WAIVED', 'CREDITED'));
 
 CREATE INDEX IF NOT EXISTS idx_policy_installment_plan
     ON policy_installment (tenant_id, plan_id, installment_number);
@@ -564,7 +581,10 @@ CREATE INDEX IF NOT EXISTS idx_billing_dunning_action_policy
 -- DRAFT and then advances to ISSUED, APPLIED, or CANCELLED; note_number is
 -- unique per policy and the sequence keeps concurrent creates collision-free.
 -- issued_at/applied_at are set by the transition that reaches that state, so a
--- CANCELLED note never invents a timestamp.
+-- CANCELLED note never invents a timestamp. applied_installment_id names the
+-- installment an APPLIED note was credited against; it stays nullable because
+-- older APPLIED notes predate installment application and ISSUED/CANCELLED
+-- notes never reference one.
 CREATE TABLE IF NOT EXISTS policy_credit_note (
     id UUID PRIMARY KEY,
     tenant_id UUID NOT NULL,
@@ -576,6 +596,7 @@ CREATE TABLE IF NOT EXISTS policy_credit_note (
     status VARCHAR(16) NOT NULL DEFAULT 'DRAFT',
     issued_at TIMESTAMPTZ,
     applied_at TIMESTAMPTZ,
+    applied_installment_id UUID,
     created_at TIMESTAMPTZ NOT NULL,
     CONSTRAINT uq_policy_credit_note_number UNIQUE (policy_id, note_number),
     CONSTRAINT ck_policy_credit_note_amount CHECK (amount > 0),
@@ -589,8 +610,14 @@ CREATE TABLE IF NOT EXISTS policy_credit_note (
         CHECK (status <> 'APPLIED' OR applied_at IS NOT NULL)
 );
 
+-- Additive migration for databases that already have the credit note table.
+ALTER TABLE policy_credit_note
+    ADD COLUMN IF NOT EXISTS applied_installment_id UUID;
+
 CREATE INDEX IF NOT EXISTS idx_policy_credit_note_policy
     ON policy_credit_note (tenant_id, policy_id, created_at DESC, note_number DESC);
+CREATE INDEX IF NOT EXISTS idx_policy_credit_note_installment
+    ON policy_credit_note (tenant_id, applied_installment_id);
 
 -- Mass tort policy profile (SPEC 11.2.4 `policy_mass_tort_profile`). One row
 -- per policy; the unique policy_id is the upsert arbiter. A COMPLETE profile

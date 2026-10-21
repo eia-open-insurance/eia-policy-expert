@@ -58,13 +58,15 @@ class BillingReceivablesControllerTest {
                 .andExpect(jsonPath("$.items[0].installmentNumber").value(1))
                 .andExpect(jsonPath("$.items[0].dueDate").value("2026-06-01"))
                 .andExpect(jsonPath("$.items[0].amount").value("1000.0000"))
+                .andExpect(jsonPath("$.items[0].creditedAmount").value("250.0000"))
+                .andExpect(jsonPath("$.items[0].outstandingAmount").value("750.0000"))
                 .andExpect(jsonPath("$.items[0].currency").value("USD"))
                 .andExpect(jsonPath("$.items[0].status").value("OVERDUE"))
                 .andExpect(jsonPath("$.items[0].daysPastDue").value(14))
                 .andExpect(jsonPath("$.items[0].lastDunningLevel").value("FIRST_NOTICE"))
                 .andExpect(jsonPath("$.items[0].lastDunningAt").value("2026-06-10T09:00:00Z"))
-                .andExpect(jsonPath("$.totalAmount").value("1000.0000"))
-                .andExpect(jsonPath("$.overdueAmount").value("1000.0000"))
+                .andExpect(jsonPath("$.totalAmount").value("750.0000"))
+                .andExpect(jsonPath("$.overdueAmount").value("750.0000"))
                 .andExpect(jsonPath("$.count").value(1));
     }
 
@@ -159,9 +161,10 @@ class BillingReceivablesControllerTest {
 
     private static ReceivablesView view() {
         InstallmentReceivable item = new InstallmentReceivable(INSTALLMENT_ID, PLAN_ID, "BP-0001",
-                POLICY_ID, "POL-0001", PARTY_ID, 1, DUE, new BigDecimal("1000.0000"), "USD",
-                "OVERDUE", 14, null, null, "FIRST_NOTICE", DUNNING_AT);
-        return new ReceivablesView(List.of(item), new BigDecimal("1000.0000"),
-                new BigDecimal("1000.0000"), 1);
+                POLICY_ID, "POL-0001", PARTY_ID, 1, DUE, new BigDecimal("1000.0000"),
+                new BigDecimal("250.0000"), new BigDecimal("750.0000"), "USD", "OVERDUE", 14,
+                null, null, "FIRST_NOTICE", DUNNING_AT);
+        return new ReceivablesView(List.of(item), new BigDecimal("750.0000"),
+                new BigDecimal("750.0000"), 1);
     }
 }

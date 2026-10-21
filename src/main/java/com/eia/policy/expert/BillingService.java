@@ -52,8 +52,11 @@ public class BillingService {
     }
 
     /**
-     * Returns the ACTIVE plan and its schedule, or the most recently closed plan
-     * when no plan is active. A policy without any billing plan is a 404.
+     * Returns the ACTIVE plan, its schedule, and the derived money summary, or
+     * the most recently closed plan when no plan is active. A policy without any
+     * billing plan is a 404. Each installment carries its applied
+     * {@code creditedAmount} and the resulting {@code outstandingAmount}; the
+     * summary totals paid, waived, credited, outstanding, and overdue money.
      */
     public BillingPlanView get(UUID tenantId, UUID policyId) {
         requirePolicy(tenantId, policyId);
@@ -65,12 +68,14 @@ public class BillingService {
     }
 
     /**
-     * Tenant-wide premium receivables worklist. Only unsettled installments are
-     * returned; {@code status} optionally narrows the effective status (DUE or
-     * OVERDUE) and {@code dueBefore} is an inclusive due-date cutoff. Overdue is
-     * derived from the due date at read time, so a DUE row past its due date is
-     * reported as OVERDUE with a positive {@code daysPastDue} without the read
-     * mutating the stored row.
+     * Tenant-wide premium receivables worklist. Only collectible installments
+     * are returned (PAID, WAIVED, and fully CREDITED rows are excluded);
+     * {@code status} optionally narrows the effective status (DUE or OVERDUE)
+     * and {@code dueBefore} is an inclusive due-date cutoff. Overdue is derived
+     * from the due date at read time, so a DUE row past its due date is reported
+     * as OVERDUE with a positive {@code daysPastDue} without the read mutating
+     * the stored row. The row amount stays gross; its {@code outstandingAmount}
+     * is the uncredited remainder and both summary totals sum that remainder.
      */
     public ReceivablesView listReceivables(UUID tenantId, String rawStatus,
                                            LocalDate dueBefore, int limit) {
@@ -81,12 +86,14 @@ public class BillingService {
                 .findReceivables(tenantId, status, today, dueBefore, effectiveLimit).stream()
                 .map(row -> toReceivable(row, today))
                 .toList();
+        // Totals are collectible remainders: the gross amount less the credits
+        // already applied to each open installment.
         BigDecimal totalAmount = items.stream()
-                .map(InstallmentReceivable::amount)
+                .map(InstallmentReceivable::outstandingAmount)
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
         BigDecimal overdueAmount = items.stream()
                 .filter(item -> BillingRules.OVERDUE.equals(item.status()))
-                .map(InstallmentReceivable::amount)
+                .map(InstallmentReceivable::outstandingAmount)
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
         return new ReceivablesView(items, Money.of(totalAmount), Money.of(overdueAmount),
                 items.size());
@@ -94,10 +101,12 @@ public class BillingService {
 
     private static InstallmentReceivable toReceivable(ReceivableRow row, LocalDate today) {
         String status = BillingRules.effectiveStatus(row.storedStatus(), row.dueDate(), today);
+        BigDecimal outstanding = BillingRules.outstandingAmount(
+                row.amount(), row.creditedAmount(), status);
         return new InstallmentReceivable(row.installmentId(), row.planId(), row.planNumber(),
                 row.policyId(), row.policyNumber(), row.insuredPartyId(), row.installmentNumber(),
-                row.dueDate(), row.amount(), row.currency(), status,
-                BillingRules.daysPastDue(status, row.dueDate(), today), row.paidAt(),
+                row.dueDate(), row.amount(), row.creditedAmount(), outstanding, row.currency(),
+                status, BillingRules.daysPastDue(status, row.dueDate(), today), row.paidAt(),
                 row.paymentId(), row.lastDunningLevel(), row.lastDunningAt());
     }
 
@@ -142,9 +151,9 @@ public class BillingService {
     /**
      * Settles one installment as PAID or WAIVED. Repeating the same terminal
      * status is an idempotent no-op (no new event, no version bump); switching a
-     * settled installment to the other terminal status is a 409. A DUE or
-     * OVERDUE row can be settled exactly once because the UPDATE is conditional
-     * on its current status.
+     * settled installment to the other terminal status, or settling a CREDITED
+     * row, is a 409. A DUE or OVERDUE row can be settled exactly once because
+     * the UPDATE is conditional on its current status.
      */
     @Transactional
     public PolicyInstallment updateInstallment(UUID tenantId, UUID policyId,

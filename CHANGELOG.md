@@ -119,6 +119,18 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   `policy.credit-note.cancelled` outbox events (`policyId`, `policyNumber`,
   `creditNoteId`, `noteNumber`, `amount`, `currency`, `status`) written in the
   same transaction as the status change and policy version bump.
+- Credit note application: `policy_installment.credited_amount` (numeric(19,4),
+  default 0, bounded by the gross amount), the `CREDITED` installment status,
+  and `policy_credit_note.applied_installment_id`. `PATCH .../status` accepts an
+  optional `installmentId`, required for `APPLIED`; the note amount must fit the
+  installment's uncredited remainder, a full credit moves the row to `CREDITED`,
+  and the note/installment/policy-version/outbox writes share one transaction.
+  The applied event adds `installmentId` and the cumulative `creditedAmount`.
+- Billing plan reads now carry a `summary` and per-installment
+  `creditedAmount`/`outstandingAmount`; the summary totals paid, waived,
+  credited, outstanding, and overdue money. The receivables read keeps `amount`
+  gross, adds the same two credit fields, excludes `CREDITED` rows, and sums
+  `outstandingAmount` into `totalAmount`/`overdueAmount`.
 
 ### Changed
 

@@ -57,7 +57,8 @@ class BillingReceivablesServiceTest {
     @BeforeEach
     void setUp() {
         for (String table : List.of(
-                "outbox_event", "policy_installment", "policy_billing_plan",
+                "outbox_event", "policy_credit_note", "policy_installment",
+                "policy_billing_plan",
                 "policy_limit_erosion", "policy_limit_state", "policy_limit",
                 "policy_coverage", "policy_endorsement", "policy_insured", "policy_location",
                 "policy_cancellation", "policy_reinstatement", "policy_version",
@@ -76,14 +77,15 @@ class BillingReceivablesServiceTest {
 
         assertThat(view.items()).extracting(InstallmentReceivable::installmentId)
                 .containsExactly(fixture.pastDue().id(), fixture.storedOverdue().id(),
-                        fixture.dueToday().id(), fixture.futureDue().id());
+                        fixture.dueToday().id(), fixture.partialCredited().id(),
+                        fixture.futureDue().id());
         assertThat(view.items()).extracting(InstallmentReceivable::status)
-                .containsExactly("OVERDUE", "OVERDUE", "DUE", "DUE");
+                .containsExactly("OVERDUE", "OVERDUE", "DUE", "DUE", "DUE");
         assertThat(view.items()).extracting(InstallmentReceivable::daysPastDue)
-                .containsExactly(10L, 3L, 0L, 0L);
-        assertThat(view.totalAmount()).isEqualTo(new BigDecimal("10000.0000"));
+                .containsExactly(10L, 3L, 0L, 0L, 0L);
+        assertThat(view.totalAmount()).isEqualTo(new BigDecimal("11000.0000"));
         assertThat(view.overdueAmount()).isEqualTo(new BigDecimal("5000.0000"));
-        assertThat(view.count()).isEqualTo(4);
+        assertThat(view.count()).isEqualTo(5);
 
         InstallmentReceivable derived = view.items().getFirst();
         assertThat(derived.planId()).isEqualTo(fixture.plan().id());
@@ -97,11 +99,21 @@ class BillingReceivablesServiceTest {
         assertThat(derived.currency()).isEqualTo("USD");
         assertThat(derived.paidAt()).isNull();
         assertThat(derived.paymentId()).isNull();
+        assertThat(derived.creditedAmount()).isEqualByComparingTo("0.0000");
+        assertThat(derived.outstandingAmount()).isEqualByComparingTo("1000.0000");
+
+        InstallmentReceivable partial = view.items().get(3);
+        assertThat(partial.status()).isEqualTo("DUE");
+        assertThat(partial.amount()).isEqualByComparingTo("1500.0000");
+        assertThat(partial.creditedAmount()).isEqualByComparingTo("500.0000");
+        assertThat(partial.outstandingAmount()).isEqualByComparingTo("1000.0000");
 
         assertThat(view.items()).extracting(InstallmentReceivable::installmentId)
-                .doesNotContain(fixture.paid().id(), fixture.waived().id());
+                .doesNotContain(fixture.paid().id(), fixture.waived().id(),
+                        fixture.fullyCredited().id());
         assertThat(storedStatus(fixture.pastDue().id())).isEqualTo("DUE");
         assertThat(storedStatus(fixture.storedOverdue().id())).isEqualTo("OVERDUE");
+        assertThat(storedStatus(fixture.fullyCredited().id())).isEqualTo("CREDITED");
     }
 
     @Test
@@ -110,9 +122,11 @@ class BillingReceivablesServiceTest {
 
         ReceivablesView due = billingService.listReceivables(TENANT, "due", null, 100);
         assertThat(due.items()).extracting(InstallmentReceivable::installmentId)
-                .containsExactly(fixture.dueToday().id(), fixture.futureDue().id());
+                .containsExactly(fixture.dueToday().id(), fixture.partialCredited().id(),
+                        fixture.futureDue().id());
         assertThat(due.items()).extracting(InstallmentReceivable::status)
                 .containsOnly("DUE");
+        assertThat(due.totalAmount()).isEqualTo(new BigDecimal("6000.0000"));
         assertThat(due.overdueAmount()).isEqualTo(new BigDecimal("0.0000"));
 
         ReceivablesView overdue = billingService.listReceivables(TENANT, "OVERDUE", null, 100);
@@ -245,8 +259,12 @@ class BillingReceivablesServiceTest {
                 "5000.0000", "PAID", NOW, PAYMENT);
         PolicyInstallment waived = insertInstallment(plan, 6, TODAY.plusDays(25),
                 "6000.0000", "WAIVED", null, null);
+        PolicyInstallment partialCredited = insertCreditedInstallment(plan, 7, TODAY.plusDays(4),
+                "1500.0000", "500.0000", "DUE");
+        PolicyInstallment fullyCredited = insertCreditedInstallment(plan, 8, TODAY.plusDays(30),
+                "700.0000", "700.0000", "CREDITED");
         return new Fixture(policy, plan, pastDue, dueToday, futureDue, storedOverdue, paid,
-                waived);
+                waived, partialCredited, fullyCredited);
     }
 
     private Policy createPolicy(UUID tenantId, String policyNumber) {
@@ -280,6 +298,16 @@ class BillingReceivablesServiceTest {
         return installment;
     }
 
+    private PolicyInstallment insertCreditedInstallment(PolicyBillingPlan plan, int number,
+                                                        LocalDate dueDate, String amount,
+                                                        String creditedAmount, String status) {
+        PolicyInstallment installment = new PolicyInstallment(UUID.randomUUID(), plan.tenantId(),
+                plan.id(), number, dueDate, new BigDecimal(amount),
+                new BigDecimal(creditedAmount), status, null, null, NOW);
+        billingRepository.insertInstallment(installment);
+        return installment;
+    }
+
     private String storedStatus(UUID installmentId) {
         return jdbc.queryForObject("SELECT status FROM policy_installment WHERE id = ?",
                 String.class, installmentId);
@@ -288,6 +316,7 @@ class BillingReceivablesServiceTest {
     private record Fixture(Policy policy, PolicyBillingPlan plan, PolicyInstallment pastDue,
                            PolicyInstallment dueToday, PolicyInstallment futureDue,
                            PolicyInstallment storedOverdue, PolicyInstallment paid,
-                           PolicyInstallment waived) {
+                           PolicyInstallment waived, PolicyInstallment partialCredited,
+                           PolicyInstallment fullyCredited) {
     }
 }

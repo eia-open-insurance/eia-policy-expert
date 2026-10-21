@@ -85,8 +85,11 @@ class SchemaContractTest {
         assertThat(schema).contains(
                 "CONSTRAINT uq_policy_installment_number UNIQUE (plan_id, installment_number)");
         assertThat(schema).contains("payment_id UUID");
+        assertThat(schema).contains("credited_amount NUMERIC(19,4) NOT NULL DEFAULT 0");
         assertThat(schema).contains(
-                "CHECK (status IN ('DUE', 'PAID', 'OVERDUE', 'WAIVED'))");
+                "CHECK (status IN ('DUE', 'PAID', 'OVERDUE', 'WAIVED', 'CREDITED'))");
+        assertThat(schema).contains("CONSTRAINT ck_policy_installment_credited");
+        assertThat(schema).contains("CHECK (credited_amount >= 0 AND credited_amount <= amount)");
     }
 
     @Test
@@ -213,7 +216,11 @@ class SchemaContractTest {
         assertThat(schema).contains("CONSTRAINT ck_policy_credit_note_applied");
         assertThat(schema).contains("issued_at TIMESTAMPTZ");
         assertThat(schema).contains("applied_at TIMESTAMPTZ");
+        assertThat(schema).contains("applied_installment_id UUID");
+        assertThat(schema).contains(
+                "ALTER TABLE policy_credit_note\n    ADD COLUMN IF NOT EXISTS applied_installment_id UUID");
         assertThat(schema).contains("idx_policy_credit_note_policy");
+        assertThat(schema).contains("idx_policy_credit_note_installment");
     }
 
     @Test
