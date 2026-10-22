@@ -18,6 +18,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.hasSize;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -54,7 +55,7 @@ class UnderwritingSubmissionControllerTest {
     private UnderwritingSubmissionService service;
 
     @MockitoBean
-    private SubmissionConversionService conversionService;
+    private PolicyIdempotencyService idempotencyService;
 
     @Test
     void createsASubmissionUnderThePublicPath() throws Exception {
@@ -283,9 +284,9 @@ class UnderwritingSubmissionControllerTest {
 
     @Test
     void convertsASubmissionAndReturnsTheCreatedDraftPolicy() throws Exception {
-        when(conversionService.convert(eq(TENANT), eq(SUBMISSION_ID),
-                any(ConvertSubmissionRequest.class)))
-                .thenReturn(new SubmissionConversionResult(policy(1), view("BOUND", 3), false));
+        when(idempotencyService.convert(eq(TENANT), eq(SUBMISSION_ID),
+                any(ConvertSubmissionRequest.class), isNull()))
+                .thenReturn(new IdempotentResponse<>(policy(1), 201, false));
 
         mvc.perform(post("/api/v1/policies/submissions/{id}/convert", SUBMISSION_ID)
                         .param("tenantId", TENANT.toString())
@@ -302,7 +303,8 @@ class UnderwritingSubmissionControllerTest {
 
         ArgumentCaptor<ConvertSubmissionRequest> captor =
                 ArgumentCaptor.forClass(ConvertSubmissionRequest.class);
-        verify(conversionService).convert(eq(TENANT), eq(SUBMISSION_ID), captor.capture());
+        verify(idempotencyService).convert(eq(TENANT), eq(SUBMISSION_ID), captor.capture(),
+                isNull());
         assertThat(captor.getValue().premiumAmount()).isEqualByComparingTo("125000");
         assertThat(captor.getValue().premiumCurrency()).isEqualTo("USD");
         assertThat(captor.getValue().expirationDate()).isNull();
@@ -310,9 +312,9 @@ class UnderwritingSubmissionControllerTest {
 
     @Test
     void replaysAConversionAsOkWithTheExistingPolicy() throws Exception {
-        when(conversionService.convert(eq(TENANT), eq(SUBMISSION_ID),
-                any(ConvertSubmissionRequest.class)))
-                .thenReturn(new SubmissionConversionResult(policy(1), view("BOUND", 3), true));
+        when(idempotencyService.convert(eq(TENANT), eq(SUBMISSION_ID),
+                any(ConvertSubmissionRequest.class), isNull()))
+                .thenReturn(new IdempotentResponse<>(policy(1), 200, true));
 
         mvc.perform(post("/api/v1/policies/submissions/{id}/convert", SUBMISSION_ID)
                         .param("tenantId", TENANT.toString())
@@ -325,6 +327,24 @@ class UnderwritingSubmissionControllerTest {
     }
 
     @Test
+    void replaysAKeyedConversionWithTheStoredPolicy() throws Exception {
+        when(idempotencyService.convert(eq(TENANT), eq(SUBMISSION_ID),
+                any(ConvertSubmissionRequest.class), eq("convert-key-1")))
+                .thenReturn(new IdempotentResponse<>(policy(1), 200, true));
+
+        mvc.perform(post("/api/v1/policies/submissions/{id}/convert", SUBMISSION_ID)
+                        .param("tenantId", TENANT.toString())
+                        .header("Idempotency-Key", "convert-key-1")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"premiumAmount\":125000,\"premiumCurrency\":\"USD\"}"))
+                .andExpect(status().isOk())
+                .andExpect(header().string("ETag", "\"1\""))
+                .andExpect(header().string("Idempotent-Replayed", "true"))
+                .andExpect(jsonPath("$.id").value(POLICY_ID.toString()))
+                .andExpect(jsonPath("$.submissionId").value(SUBMISSION_ID.toString()));
+    }
+
+    @Test
     void rejectsAConversionWithoutAPremiumBeforeTheService() throws Exception {
         mvc.perform(post("/api/v1/policies/submissions/{id}/convert", SUBMISSION_ID)
                         .param("tenantId", TENANT.toString())
@@ -334,13 +354,13 @@ class UnderwritingSubmissionControllerTest {
                 .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"))
                 .andExpect(jsonPath("$.errors[0].field").value("premiumAmount"));
 
-        verifyNoInteractions(conversionService);
+        verifyNoInteractions(idempotencyService);
     }
 
     @Test
     void mapsANonConvertibleSubmissionToAConflict() throws Exception {
-        when(conversionService.convert(eq(TENANT), eq(SUBMISSION_ID),
-                any(ConvertSubmissionRequest.class)))
+        when(idempotencyService.convert(eq(TENANT), eq(SUBMISSION_ID),
+                any(ConvertSubmissionRequest.class), isNull()))
                 .thenThrow(PolicyErrors.conflict("SUBMISSION_NOT_CONVERTIBLE", "status",
                         "Submission is RECEIVED.", java.util.Map.of(
                                 "currentStatus", "RECEIVED")));

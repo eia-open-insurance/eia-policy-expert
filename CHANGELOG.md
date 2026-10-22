@@ -12,13 +12,18 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
 - Policy expert slice: PostgreSQL-backed `policy` table, create/list/get/status endpoints, lifecycle and money invariants, structured errors, and JUnit tests.
 - Canonical RFC 9457 `application/problem+json` errors with
   `errors[{field, code, message}]`, `meta`, and correlation ids.
-- `policy_idempotency` table with unique constraint
-  `(tenant_id, idempotency_key)` and transactional create replay.
+- `policy_idempotency` table scoped by
+  `(tenant_id, operation, idempotency_key)` with transactional create replay and
+  stored-response replay for policy rating and submission conversion.
 - Page envelope `{items, page, size, total, _links}` for the internal list with
   `updated_at DESC, id ASC` ordering.
 - `ETag` on detail and mutation responses plus `If-Match` concurrency control.
 - `Idempotency-Key` support on create with `Idempotent-Replayed` response
   headers.
+- Stored-response `Idempotency-Key` replay on policy rating and submission
+  conversion: the first call is `201`, a replay is `200` with the stored
+  worksheet/policy body and ETag, the key is capped at 128 characters, and the
+  scope is tenant plus operation.
 - Second slice: immutable `policy_version` history with a single-ISSUED partial
   unique index, canonical SHA-256 snapshot hashes re-verified on read, and the
   derived current version.

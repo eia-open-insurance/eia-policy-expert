@@ -294,7 +294,7 @@ public class PolicyRepository {
         return jdbc.query("""
                         SELECT policy_id, request_hash
                           FROM policy_idempotency
-                         WHERE tenant_id = ? AND idempotency_key = ?
+                         WHERE tenant_id = ? AND operation = 'create' AND idempotency_key = ?
                         """,
                 (rs, rowNum) -> new IdempotencyRecord(
                         rs.getObject("policy_id", UUID.class),
@@ -303,19 +303,20 @@ public class PolicyRepository {
     }
 
     /**
-     * Reserves the idempotency key with a single PostgreSQL statement. The
-     * unique constraint {@code (tenant_id, idempotency_key)} decides the winner;
-     * {@code ON CONFLICT DO NOTHING} returns zero instead of aborting the
-     * transaction, so a concurrent duplicate can be read back safely.
+     * Reserves the idempotency key with a single statement. The unique
+     * constraint {@code (tenant_id, operation, idempotency_key)} decides the
+     * winner; {@code ON CONFLICT DO NOTHING} returns zero instead of aborting
+     * the transaction, so a concurrent duplicate can be read back safely.
      */
     public boolean insertIdempotencyIfAbsent(UUID tenantId, String key, String requestHash,
                                              UUID policyId) {
         int rows = jdbc.update("""
                 INSERT INTO policy_idempotency
-                       (tenant_id, idempotency_key, request_hash, policy_id, created_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
-                """, tenantId, key, requestHash, policyId, Timestamp.from(Instant.now()));
+                       (id, tenant_id, idempotency_key, operation, request_hash, policy_id, created_at)
+                VALUES (?, ?, ?, 'create', ?, ?, ?)
+                ON CONFLICT DO NOTHING
+                """, UUID.randomUUID(), tenantId, key, requestHash, policyId,
+                Timestamp.from(Instant.now()));
         return rows == 1;
     }
 

@@ -13,14 +13,20 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class SchemaContractTest {
     @Test
-    void schemaStoresIdempotencyKeyWithTenantUniqueConstraint() throws Exception {
+    void schemaStoresIdempotencyResponsesWithAnOperationScopedUniqueConstraint() throws Exception {
         String schema = schema();
 
         assertThat(schema).contains("CREATE TABLE IF NOT EXISTS policy_idempotency");
+        assertThat(schema).contains("id UUID PRIMARY KEY");
         assertThat(schema).contains("idempotency_key VARCHAR(255) NOT NULL");
-        assertThat(schema).contains("request_hash CHAR(64) NOT NULL");
+        assertThat(schema).contains("operation VARCHAR(64) NOT NULL");
+        assertThat(schema).contains("response_json TEXT");
+        assertThat(schema).contains("response_status INTEGER");
+        assertThat(schema).contains("request_hash CHAR(64)");
         assertThat(schema).contains(
-                "CONSTRAINT uq_policy_idempotency_key UNIQUE (tenant_id, idempotency_key)");
+                "CONSTRAINT uq_policy_idempotency_key UNIQUE (tenant_id, operation, idempotency_key)");
+        assertThat(schema).contains(
+                "ALTER TABLE policy_idempotency ADD COLUMN IF NOT EXISTS operation VARCHAR(64)");
     }
 
     @Test

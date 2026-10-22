@@ -95,8 +95,9 @@ contract structures from SPEC 11.2:
 Every second-slice mutation accepts an optional `If-Match` strong entity tag
 (the aggregate `version`), returns the new `ETag`, and accepts an optional
 `Idempotency-Key` scoped by tenant and command type. A replay returns `200` with
-`Idempotent-Replayed: true`; reuse with a different request is `409
-IDEMPOTENCY_CONFLICT`.
+`Idempotent-Replayed: true`; for resource commands, reuse with a different
+request is `409 IDEMPOTENCY_CONFLICT`. Rating and submission conversion store
+the successful response body and replay it without re-evaluating the request.
 
 ### Second-slice endpoints
 
@@ -301,7 +302,7 @@ same controller keeps the `/internal/v1` alias for the domain adapter):
 | `POST` | `/api/v1/policies/submissions` | Create a `RECEIVED` submission; `201` with the generated `submissionNumber` |
 | `GET` | `/api/v1/policies/submissions/{id}` | One submission; `404 SUBMISSION_NOT_FOUND`; `policyId` is populated after conversion |
 | `PATCH` | `/api/v1/policies/submissions/{id}/status` | Apply `{status, reason?}`; returns the updated submission with its new `ETag`, `409 INVALID_SUBMISSION_TRANSITION` for an out-of-order or terminal transition |
-| `POST` | `/api/v1/policies/submissions/{id}/convert` | Convert a `QUOTED` (or unlinked `BOUND`) submission into a `DRAFT` policy; `201` with the policy, `200 Idempotent-Replayed: true` when the linked policy already exists, `409 SUBMISSION_NOT_CONVERTIBLE` for any other status |
+| `POST` | `/api/v1/policies/submissions/{id}/convert` | Convert a `QUOTED` (or unlinked `BOUND`) submission into a `DRAFT` policy; `201` with the policy, `200 Idempotent-Replayed: true` when the linked policy already exists or the `Idempotency-Key` is replayed, `409 SUBMISSION_NOT_CONVERTIBLE` for any other status |
 
 The create body is `{applicantPartyId, productCode, requestedEffectiveDate,
 requestedLimitAmount, requestedLimitCurrency, tortCodes[], notes?}`. The product
@@ -337,6 +338,18 @@ transaction. A conversion retry returns the existing policy with `200` and
 `Idempotent-Replayed: true` instead of creating a second policy. Only `QUOTED`
 and `BOUND` submissions are convertible; every other status is
 `409 SUBMISSION_NOT_CONVERTIBLE`.
+
+`POST /api/v1/policies/{policyId}/rating` and
+`POST /api/v1/policies/submissions/{id}/convert` also accept an optional
+`Idempotency-Key` of at most 128 characters. The first call stores the
+successful response body in `policy_idempotency` in the same transaction as the
+command; a replay returns `200`, `Idempotent-Replayed: true`, the stored body,
+and the original body's ETag. The unique scope is
+`(tenant_id, operation, idempotency_key)`, so the same key can be reused for a
+different command or tenant. An over-long key is `400
+INVALID_IDEMPOTENCY_KEY` before any write. Without a key the command keeps its
+normal behaviour: rating always creates a worksheet and conversion still
+replays an already-linked policy.
 
 Credit notes are exposed under `/api/v1/policies/{policyId}/credit-notes` (the
 same controller keeps the `/internal/v1` alias for the domain adapter):
@@ -430,8 +443,9 @@ and `lastDunningAt` from the latest `SENT` dunning action for the installment
   accepts `If-Match` with precedence over the compatibility `expectedVersion`
   body field on status changes. Stale versions are `409
   CONCURRENT_MODIFICATION`.
-- `POST /internal/v1/policies` accepts `Idempotency-Key`; the first create is
-  `201`, a replay is `200` with `Idempotent-Replayed: true`.
+- `POST /internal/v1/policies`, policy rating, and submission conversion accept
+  `Idempotency-Key`; the first call is `201`, a replay is `200` with
+  `Idempotent-Replayed: true` and the stored response body/ETag.
 
 ## Local development
 

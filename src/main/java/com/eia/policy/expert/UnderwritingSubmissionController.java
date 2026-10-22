@@ -31,15 +31,16 @@ import java.util.UUID;
         "/internal/v1/policies/submissions"
 })
 public class UnderwritingSubmissionController {
+    private static final String IDEMPOTENCY_KEY = "Idempotency-Key";
     private static final String IDEMPOTENT_REPLAYED = "Idempotent-Replayed";
 
     private final UnderwritingSubmissionService service;
-    private final SubmissionConversionService conversionService;
+    private final PolicyIdempotencyService idempotencyService;
 
     public UnderwritingSubmissionController(UnderwritingSubmissionService service,
-                                            SubmissionConversionService conversionService) {
+                                            PolicyIdempotencyService idempotencyService) {
         this.service = service;
-        this.conversionService = conversionService;
+        this.idempotencyService = idempotencyService;
     }
 
     @GetMapping
@@ -98,10 +99,11 @@ public class UnderwritingSubmissionController {
 
     /**
      * Converts a QUOTED (or BOUND) submission into its DRAFT policy. A new
-     * conversion is {@code 201}; replaying an already-converted submission is
-     * {@code 200} with {@code Idempotent-Replayed: true} and the same policy.
-     * The body supplies the premium and optional expiration; all other terms
-     * come from the submission.
+     * conversion is {@code 201}; replaying an already-converted submission or a
+     * stored {@code Idempotency-Key} is {@code 200} with {@code
+     * Idempotent-Replayed: true} and the same policy body/ETag. The body
+     * supplies the premium and optional expiration; all other terms come from
+     * the submission.
      */
     @PostMapping("/{id}/convert")
     public ResponseEntity<Policy> convert(
@@ -110,14 +112,14 @@ public class UnderwritingSubmissionController {
             @RequestHeader(value = RequestScope.TENANT_HEADER, required = false)
             String tenantHeader,
             @RequestHeader(value = RequestScope.BOOK_HEADER, required = false) String book,
+            @RequestHeader(value = IDEMPOTENCY_KEY, required = false) String idempotencyKey,
             @Valid @RequestBody ConvertSubmissionRequest request) {
         RequestScope.requireDirectBook(book);
-        SubmissionConversionResult result = conversionService.convert(
-                RequestScope.tenant(tenantId, tenantHeader), id, request);
-        HttpStatus status = result.replayed() ? HttpStatus.OK : HttpStatus.CREATED;
-        return ResponseEntity.status(status)
-                .eTag(Integer.toString(result.policy().version()))
-                .header(IDEMPOTENT_REPLAYED, Boolean.toString(result.replayed()))
-                .body(result.policy());
+        IdempotentResponse<Policy> outcome = idempotencyService.convert(
+                RequestScope.tenant(tenantId, tenantHeader), id, request, idempotencyKey);
+        return ResponseEntity.status(outcome.status())
+                .eTag(Integer.toString(outcome.body().version()))
+                .header(IDEMPOTENT_REPLAYED, Boolean.toString(outcome.replayed()))
+                .body(outcome.body());
     }
 }

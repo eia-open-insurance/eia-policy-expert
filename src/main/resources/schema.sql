@@ -153,19 +153,51 @@ ALTER TABLE policy ADD CONSTRAINT fk_policy_legal_entity
 CREATE INDEX IF NOT EXISTS idx_policy_legal_entity
     ON policy (tenant_id, legal_entity_id);
 
--- Idempotency scope for POST /internal/v1/policies: tenant + key. The unique
--- constraint is the concurrency arbiter for duplicate creates. The row is
--- written in the same transaction as the policy, so a failed create leaves no
--- reservation behind.
+-- Command idempotency with response replay. The scope is
+-- (tenant, operation, key), so the same key can be reused for a different
+-- command. response_json stores the exact successful response a replay
+-- returns and response_status records the status of the original response; a
+-- replay is always served as 200 with Idempotent-Replayed: true. The row is
+-- reserved and completed in the same transaction as the command, so a failed
+-- command leaves no key behind.
+--
+-- request_hash and policy_id are the legacy create-policy replay fields. They
+-- stay nullable so response-replay rows (rating, submission conversion) do not
+-- have to invent a request hash or a policy link.
 CREATE TABLE IF NOT EXISTS policy_idempotency (
+    id UUID PRIMARY KEY,
     tenant_id UUID NOT NULL,
     idempotency_key VARCHAR(255) NOT NULL,
-    request_hash CHAR(64) NOT NULL,
-    policy_id UUID NOT NULL,
+    operation VARCHAR(64) NOT NULL,
+    response_json TEXT,
+    response_status INTEGER,
+    request_hash CHAR(64),
+    policy_id UUID,
     created_at TIMESTAMPTZ NOT NULL,
-    CONSTRAINT uq_policy_idempotency_key UNIQUE (tenant_id, idempotency_key)
+    CONSTRAINT uq_policy_idempotency_key UNIQUE (tenant_id, operation, idempotency_key)
 );
 
+-- Forward-only migration for databases that already created the original
+-- tenant+key create-policy table. PostgreSQL has no ADD CONSTRAINT IF NOT
+-- EXISTS, so the unique key is dropped and re-added with the operation scope.
+-- Existing create-policy rows are backfilled into the operation namespace.
+ALTER TABLE policy_idempotency ADD COLUMN IF NOT EXISTS id UUID;
+ALTER TABLE policy_idempotency ADD COLUMN IF NOT EXISTS operation VARCHAR(64);
+ALTER TABLE policy_idempotency ADD COLUMN IF NOT EXISTS response_json TEXT;
+ALTER TABLE policy_idempotency ADD COLUMN IF NOT EXISTS response_status INTEGER;
+ALTER TABLE policy_idempotency ALTER COLUMN request_hash DROP NOT NULL;
+ALTER TABLE policy_idempotency ALTER COLUMN policy_id DROP NOT NULL;
+UPDATE policy_idempotency
+   SET id = md5(tenant_id::text || ':' || idempotency_key)::uuid
+ WHERE id IS NULL;
+UPDATE policy_idempotency SET operation = 'create' WHERE operation IS NULL;
+ALTER TABLE policy_idempotency ALTER COLUMN id SET NOT NULL;
+ALTER TABLE policy_idempotency ALTER COLUMN operation SET NOT NULL;
+ALTER TABLE policy_idempotency DROP CONSTRAINT IF EXISTS uq_policy_idempotency_key;
+ALTER TABLE policy_idempotency ADD CONSTRAINT uq_policy_idempotency_key
+    UNIQUE (tenant_id, operation, idempotency_key);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_policy_idempotency_id ON policy_idempotency (id);
 CREATE INDEX IF NOT EXISTS idx_policy_idempotency_policy ON policy_idempotency (policy_id);
 
 -- Generic command idempotency for the second-slice mutations (coverage,

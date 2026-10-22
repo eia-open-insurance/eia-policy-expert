@@ -46,16 +46,22 @@ class PolicyRatingControllerTest {
     @MockitoBean
     private PolicyRatingService service;
 
+    @MockitoBean
+    private PolicyIdempotencyService idempotencyService;
+
     @Test
     void calculatesAWorksheetAndOmitsThePolicyWhenNotApplied() throws Exception {
-        when(service.rate(eq(TENANT), eq(POLICY_ID), any(RatingRequest.class), isNull()))
-                .thenReturn(new RatingResult(worksheet(), null));
+        when(idempotencyService.rate(eq(TENANT), eq(POLICY_ID), any(RatingRequest.class),
+                isNull(), isNull()))
+                .thenReturn(new IdempotentResponse<>(
+                        new RatingResult(worksheet(), null), 201, false));
 
         mvc.perform(post("/api/v1/policies/{policyId}/rating", POLICY_ID)
                         .param("tenantId", TENANT.toString())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(request(false))))
                 .andExpect(status().isCreated())
+                .andExpect(header().string("Idempotent-Replayed", "false"))
                 .andExpect(jsonPath("$.worksheet.id").value(WORKSHEET_ID.toString()))
                 .andExpect(jsonPath("$.worksheet.policyId").value(POLICY_ID.toString()))
                 .andExpect(jsonPath("$.worksheet.ratingMethod").value("RATE_TIMES_EXPOSURE"))
@@ -71,8 +77,10 @@ class PolicyRatingControllerTest {
 
     @Test
     void appliesTheRatingAndReturnsTheUpdatedPolicyWithItsETag() throws Exception {
-        when(service.rate(eq(TENANT), eq(POLICY_ID), any(RatingRequest.class), eq("\"3\"")))
-                .thenReturn(new RatingResult(worksheet(), policy(4)));
+        when(idempotencyService.rate(eq(TENANT), eq(POLICY_ID), any(RatingRequest.class),
+                eq("\"3\""), isNull()))
+                .thenReturn(new IdempotentResponse<>(
+                        new RatingResult(worksheet(), policy(4)), 201, false));
 
         mvc.perform(post("/api/v1/policies/{policyId}/rating", POLICY_ID)
                         .param("tenantId", TENANT.toString())
@@ -81,6 +89,7 @@ class PolicyRatingControllerTest {
                         .content(objectMapper.writeValueAsString(request(true))))
                 .andExpect(status().isCreated())
                 .andExpect(header().string("ETag", "\"4\""))
+                .andExpect(header().string("Idempotent-Replayed", "false"))
                 .andExpect(jsonPath("$.worksheet.computedPremium").value("15625.0000"))
                 .andExpect(jsonPath("$.policy.id").value(POLICY_ID.toString()))
                 .andExpect(jsonPath("$.policy.premiumAmount").value("15625.0000"))
@@ -88,9 +97,30 @@ class PolicyRatingControllerTest {
     }
 
     @Test
+    void replaysAKeyedRatingWithTheStoredBodyStatusAndETag() throws Exception {
+        when(idempotencyService.rate(eq(TENANT), eq(POLICY_ID), any(RatingRequest.class),
+                isNull(), eq("rate-key-1")))
+                .thenReturn(new IdempotentResponse<>(
+                        new RatingResult(worksheet(), policy(4)), 200, true));
+
+        mvc.perform(post("/api/v1/policies/{policyId}/rating", POLICY_ID)
+                        .param("tenantId", TENANT.toString())
+                        .header("Idempotency-Key", "rate-key-1")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request(true))))
+                .andExpect(status().isOk())
+                .andExpect(header().string("ETag", "\"4\""))
+                .andExpect(header().string("Idempotent-Replayed", "true"))
+                .andExpect(jsonPath("$.worksheet.id").value(WORKSHEET_ID.toString()))
+                .andExpect(jsonPath("$.policy.version").value(4));
+    }
+
+    @Test
     void keepsTheInternalAliasAndAcceptsTheTenantHeader() throws Exception {
-        when(service.rate(eq(TENANT), eq(POLICY_ID), any(RatingRequest.class), isNull()))
-                .thenReturn(new RatingResult(worksheet(), null));
+        when(idempotencyService.rate(eq(TENANT), eq(POLICY_ID), any(RatingRequest.class),
+                isNull(), isNull()))
+                .thenReturn(new IdempotentResponse<>(
+                        new RatingResult(worksheet(), null), 201, false));
 
         mvc.perform(post("/internal/v1/policies/{policyId}/rating", POLICY_ID)
                         .header("X-EIA-Tenant", TENANT.toString())
@@ -137,7 +167,8 @@ class PolicyRatingControllerTest {
 
     @Test
     void surfacesANonRateablePolicyAsA409Problem() throws Exception {
-        when(service.rate(eq(TENANT), eq(POLICY_ID), any(RatingRequest.class), isNull()))
+        when(idempotencyService.rate(eq(TENANT), eq(POLICY_ID), any(RatingRequest.class),
+                isNull(), isNull()))
                 .thenThrow(PolicyErrors.conflict("POLICY_NOT_RATEABLE", "status",
                         "Only DRAFT or QUOTED policies are rateable."));
 
@@ -186,6 +217,7 @@ class PolicyRatingControllerTest {
                 .andExpect(jsonPath("$.code").value("NOT_FOUND"));
 
         verifyNoInteractions(service);
+        verifyNoInteractions(idempotencyService);
     }
 
     private static RatingRequest request(boolean apply) {

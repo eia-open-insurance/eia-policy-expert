@@ -23,8 +23,13 @@ class IdempotencyKeysTest {
     }
 
     @Test
+    void acceptsAKeyAtTheMaximumLength() {
+        assertThat(IdempotencyKeys.normalize("k".repeat(128))).hasSize(128);
+    }
+
+    @Test
     void rejectsOverlongKey() {
-        assertThatThrownBy(() -> IdempotencyKeys.normalize("k".repeat(256)))
+        assertThatThrownBy(() -> IdempotencyKeys.normalize("k".repeat(129)))
                 .isInstanceOf(ApiException.class)
                 .satisfies(ex -> assertThat(((ApiException) ex).code())
                         .isEqualTo("INVALID_IDEMPOTENCY_KEY"));

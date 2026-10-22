@@ -1,7 +1,6 @@
 package com.eia.policy.expert;
 
 import jakarta.validation.Valid;
-import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -22,7 +21,9 @@ import java.util.UUID;
  *
  * <p>{@code POST} creates one worksheet ({@code 201}); when the request applies
  * the rating, the response also carries the refreshed policy and its new ETag.
- * {@code GET} returns the newest worksheet for the policy.</p>
+ * An optional {@code Idempotency-Key} replays the stored response as {@code
+ * 200} with {@code Idempotent-Replayed: true}. {@code GET} returns the newest
+ * worksheet for the policy.</p>
  */
 @RestController
 @RequestMapping({
@@ -31,11 +32,16 @@ import java.util.UUID;
 })
 public class PolicyRatingController {
     private static final String IF_MATCH = "If-Match";
+    private static final String IDEMPOTENCY_KEY = "Idempotency-Key";
+    private static final String IDEMPOTENT_REPLAYED = "Idempotent-Replayed";
 
     private final PolicyRatingService service;
+    private final PolicyIdempotencyService idempotencyService;
 
-    public PolicyRatingController(PolicyRatingService service) {
+    public PolicyRatingController(PolicyRatingService service,
+                                  PolicyIdempotencyService idempotencyService) {
         this.service = service;
+        this.idempotencyService = idempotencyService;
     }
 
     @PostMapping
@@ -46,15 +52,19 @@ public class PolicyRatingController {
             String tenantHeader,
             @RequestHeader(value = RequestScope.BOOK_HEADER, required = false) String book,
             @RequestHeader(value = IF_MATCH, required = false) String ifMatch,
+            @RequestHeader(value = IDEMPOTENCY_KEY, required = false) String idempotencyKey,
             @Valid @RequestBody RatingRequest request) {
         RequestScope.requireDirectBook(book);
-        RatingResult result = service.rate(RequestScope.tenant(tenantId, tenantHeader),
-                policyId, request, ifMatch);
-        ResponseEntity.BodyBuilder response = ResponseEntity.status(HttpStatus.CREATED);
+        IdempotentResponse<RatingResult> outcome = idempotencyService.rate(
+                RequestScope.tenant(tenantId, tenantHeader), policyId, request, ifMatch,
+                idempotencyKey);
+        RatingResult result = outcome.body();
+        ResponseEntity.BodyBuilder response = ResponseEntity.status(outcome.status());
         if (result.policy() != null) {
             response.eTag(EntityTags.format(result.policy().version()));
         }
-        return response.body(result);
+        return response.header(IDEMPOTENT_REPLAYED, Boolean.toString(outcome.replayed()))
+                .body(result);
     }
 
     @GetMapping

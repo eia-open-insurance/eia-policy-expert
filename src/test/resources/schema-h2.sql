@@ -136,15 +136,41 @@ ALTER TABLE policy ADD CONSTRAINT fk_policy_legal_entity
 CREATE INDEX IF NOT EXISTS idx_policy_legal_entity
     ON policy (tenant_id, legal_entity_id);
 
+-- H2-compatible copy of command idempotency with response replay. The
+-- operation scopes the key; response_json/response_status store the original
+-- successful response that a replay returns. request_hash/policy_id are the
+-- legacy create-policy fields and stay nullable for response-replay rows.
 CREATE TABLE IF NOT EXISTS policy_idempotency (
+    id UUID PRIMARY KEY,
     tenant_id UUID NOT NULL,
     idempotency_key VARCHAR(255) NOT NULL,
-    request_hash CHAR(64) NOT NULL,
-    policy_id UUID NOT NULL,
+    operation VARCHAR(64) NOT NULL,
+    response_json TEXT,
+    response_status INTEGER,
+    request_hash CHAR(64),
+    policy_id UUID,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL,
-    CONSTRAINT uq_policy_idempotency_key UNIQUE (tenant_id, idempotency_key)
+    CONSTRAINT uq_policy_idempotency_key UNIQUE (tenant_id, operation, idempotency_key)
 );
 
+-- H2-compatible copy of the forward migration. Existing create-policy rows are
+-- backfilled into the create operation namespace before the columns become
+-- mandatory. H2 uses RANDOM_UUID where PostgreSQL uses gen_random_uuid.
+ALTER TABLE policy_idempotency ADD COLUMN IF NOT EXISTS id UUID;
+ALTER TABLE policy_idempotency ADD COLUMN IF NOT EXISTS operation VARCHAR(64);
+ALTER TABLE policy_idempotency ADD COLUMN IF NOT EXISTS response_json TEXT;
+ALTER TABLE policy_idempotency ADD COLUMN IF NOT EXISTS response_status INTEGER;
+ALTER TABLE policy_idempotency ALTER COLUMN request_hash DROP NOT NULL;
+ALTER TABLE policy_idempotency ALTER COLUMN policy_id DROP NOT NULL;
+UPDATE policy_idempotency SET id = RANDOM_UUID() WHERE id IS NULL;
+UPDATE policy_idempotency SET operation = 'create' WHERE operation IS NULL;
+ALTER TABLE policy_idempotency ALTER COLUMN id SET NOT NULL;
+ALTER TABLE policy_idempotency ALTER COLUMN operation SET NOT NULL;
+ALTER TABLE policy_idempotency DROP CONSTRAINT IF EXISTS uq_policy_idempotency_key;
+ALTER TABLE policy_idempotency ADD CONSTRAINT uq_policy_idempotency_key
+    UNIQUE (tenant_id, operation, idempotency_key);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_policy_idempotency_id ON policy_idempotency (id);
 CREATE INDEX IF NOT EXISTS idx_policy_idempotency_policy ON policy_idempotency (policy_id);
 
 CREATE TABLE IF NOT EXISTS policy_command_idempotency (

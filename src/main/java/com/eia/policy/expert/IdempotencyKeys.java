@@ -12,16 +12,17 @@ import java.util.Locale;
 import java.util.UUID;
 
 /**
- * Idempotency support for policy creation.
+ * Idempotency support for policy commands.
  *
- * <p>The key scope is {@code tenant + key}. The request hash is computed from a
- * canonical field-ordered string, so a retry with the same business request
- * replays and a reuse with a different request is rejected. Amounts are
- * normalized numerically ({@code 1000.0} and {@code 1000.0000} hash the same),
- * which matches JSON money semantics.
+ * <p>The key scope is {@code tenant + operation + key}. The request hash is
+ * computed from a canonical field-ordered string, so a retry with the same
+ * business request replays and a reuse with a different request is rejected.
+ * Amounts are normalized numerically ({@code 1000.0} and {@code 1000.0000} hash
+ * the same), which matches JSON money semantics. Keys are capped at 128
+ * characters for every command, including rating and submission conversion.
  */
 final class IdempotencyKeys {
-    static final int MAX_LENGTH = 255;
+    static final int MAX_LENGTH = 128;
 
     private IdempotencyKeys() {
     }
