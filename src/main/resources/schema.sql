@@ -795,6 +795,51 @@ CREATE TABLE IF NOT EXISTS policy_rating_worksheet (
 CREATE INDEX IF NOT EXISTS idx_policy_rating_worksheet_policy
     ON policy_rating_worksheet (tenant_id, policy_id, created_at DESC, id);
 
+-- Underwriting submission intake (SPEC 11.2.14). A submission is a tenant-owned
+-- aggregate that exists before a policy. The number is server-generated per
+-- tenant (SUB-{year}-{7 digits}) and unique; the counter row is locked by the
+-- allocator so concurrent creates cannot read the same value. The status graph
+-- is RECEIVED -> REFERRED/QUOTED/DECLINED/WITHDRAWN, REFERRED ->
+-- QUOTED/DECLINED/WITHDRAWN, and QUOTED -> BOUND/DECLINED/WITHDRAWN; BOUND,
+-- DECLINED, and WITHDRAWN are terminal. tort_codes is a PostgreSQL text array;
+-- every code is validated by the application at 20 entries x 32 characters.
+CREATE TABLE IF NOT EXISTS underwriting_submission_number_seq (
+    tenant_id UUID PRIMARY KEY,
+    next_value BIGINT NOT NULL,
+    CONSTRAINT ck_underwriting_submission_number_seq CHECK (next_value >= 1)
+);
+
+CREATE TABLE IF NOT EXISTS underwriting_submission (
+    id UUID PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    submission_number VARCHAR(32) NOT NULL,
+    applicant_party_id UUID NOT NULL,
+    product_code VARCHAR(64) NOT NULL,
+    requested_effective_date DATE NOT NULL,
+    requested_limit_amount NUMERIC(19,4) NOT NULL,
+    requested_limit_currency CHAR(3) NOT NULL,
+    tort_codes TEXT[] NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    notes VARCHAR(2000),
+    version INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
+    CONSTRAINT uq_underwriting_submission_number
+        UNIQUE (tenant_id, submission_number),
+    CONSTRAINT ck_underwriting_submission_limit
+        CHECK (requested_limit_amount >= 0),
+    CONSTRAINT ck_underwriting_submission_currency
+        CHECK (CHAR_LENGTH(TRIM(requested_limit_currency)) = 3),
+    CONSTRAINT ck_underwriting_submission_status CHECK (status IN (
+        'RECEIVED', 'REFERRED', 'QUOTED', 'BOUND', 'DECLINED', 'WITHDRAWN'
+    ))
+);
+
+CREATE INDEX IF NOT EXISTS idx_underwriting_submission_tenant_updated
+    ON underwriting_submission (tenant_id, updated_at DESC, id);
+CREATE INDEX IF NOT EXISTS idx_underwriting_submission_tenant_status
+    ON underwriting_submission (tenant_id, status, updated_at DESC, id);
+
 -- Transactional outbox (SPEC 7.5.1). The canonical copy lives in
 -- eia-platform/libs/src/main/resources/db/outbox_event.sql; keep both in sync.
 CREATE TABLE IF NOT EXISTS outbox_event (

@@ -59,6 +59,8 @@ final class PolicyEvents {
     static final String PROGRAM_ASSIGNED = "policy.policy.program-assigned";
     static final String LEGAL_ENTITY_CREATED = "policy.legal-entity.created";
     static final String LEGAL_ENTITY_ASSIGNED = "policy.policy.legal-entity-assigned";
+    static final String SUBMISSION_CREATED = "policy.submission.created";
+    static final String SUBMISSION_STATUS_CHANGED = "policy.submission.status-changed";
 
     private static final Book EVENT_BOOK = Book.DIRECT;
     private static final String VERTICAL = "policy";
@@ -68,6 +70,8 @@ final class PolicyEvents {
     private static final String PROGRAM_SUBJECT_TYPE = "program";
     private static final String LEGAL_ENTITY_AGGREGATE_TYPE = "LegalEntity";
     private static final String LEGAL_ENTITY_SUBJECT_TYPE = "legal-entity";
+    private static final String SUBMISSION_AGGREGATE_TYPE = "UnderwritingSubmission";
+    private static final String SUBMISSION_SUBJECT_TYPE = "underwriting-submission";
     private static final String SOURCE_BUILD = "eia-policy-expert@0.1.0-SNAPSHOT";
 
     private PolicyEvents() {
@@ -308,6 +312,93 @@ final class PolicyEvents {
         data.put("status", legalEntity.status());
         data.put("createdAt", instant(legalEntity.createdAt()));
         return legalEntityEnvelope(legalEntity, LEGAL_ENTITY_CREATED, data, now);
+    }
+
+    /**
+     * An underwriting submission is a tenant-owned aggregate in the policy
+     * vertical. Its creation event carries the intake facts a downstream
+     * clearance, referral, or rating consumer needs: the applicant, product,
+     * requested term and limit, tort codes, notes, and initial status.
+     * {@code UnderwritingSubmission} is not a policy, so the aggregate type and
+     * subject are submission-specific and the aggregate version starts at 1.
+     */
+    static EventEnvelope submissionCreated(UnderwritingSubmission submission, Instant now) {
+        Objects.requireNonNull(submission, "submission");
+        Map<String, Object> data = submissionData(submission);
+        data.put("createdAt", instant(submission.createdAt()));
+        data.put("updatedAt", instant(submission.updatedAt()));
+        return submissionEnvelope(submission, SUBMISSION_CREATED, data,
+                submission.version() + 1L, now);
+    }
+
+    /**
+     * A submission transition advances the aggregate version. The payload names
+     * the previous and new status and carries the optional operator reason; the
+     * reason is event-only because the submission row records just the
+     * resulting status and version.
+     */
+    static EventEnvelope submissionStatusChanged(UnderwritingSubmission before,
+                                                 UnderwritingSubmission after, String reason,
+                                                 Instant now) {
+        Objects.requireNonNull(before, "before");
+        Objects.requireNonNull(after, "after");
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("submissionId", after.id());
+        data.put("submissionNumber", after.submissionNumber());
+        data.put("applicantPartyId", after.applicantPartyId());
+        data.put("productCode", after.productCode());
+        data.put("previousStatus", before.status());
+        data.put("status", after.status());
+        data.put("version", after.version());
+        data.put("updatedAt", instant(after.updatedAt()));
+        data.put("reason", reason == null ? NullNode.getInstance() : reason);
+        return submissionEnvelope(after, SUBMISSION_STATUS_CHANGED, data,
+                after.version() + 1L, now);
+    }
+
+    private static Map<String, Object> submissionData(UnderwritingSubmission submission) {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("submissionId", submission.id());
+        data.put("submissionNumber", submission.submissionNumber());
+        data.put("applicantPartyId", submission.applicantPartyId());
+        data.put("productCode", submission.productCode());
+        data.put("requestedEffectiveDate", date(submission.requestedEffectiveDate()));
+        data.put("requestedLimitAmount", money(submission.requestedLimitAmount()));
+        data.put("requestedLimitCurrency", submission.requestedLimitCurrency());
+        data.put("tortCodes", submission.tortCodes());
+        data.put("status", submission.status());
+        data.put("notes",
+                submission.notes() == null ? NullNode.getInstance() : submission.notes());
+        data.put("version", submission.version());
+        return data;
+    }
+
+    private static EventEnvelope submissionEnvelope(UnderwritingSubmission submission,
+                                                    String eventType,
+                                                    Map<String, Object> data,
+                                                    long aggregateVersion, Instant now) {
+        UUID eventId = EventIds.deterministic(submission.tenantId(),
+                SUBMISSION_AGGREGATE_TYPE, submission.id(), aggregateVersion, eventType);
+        return EventEnvelope.builder()
+                .eventId(eventId)
+                .eventType(eventType)
+                .eventVersion(1)
+                .occurredAt(now)
+                .recordedAt(now)
+                .tenantId(submission.tenantId())
+                .book(EVENT_BOOK)
+                .vertical(VERTICAL)
+                .aggregateType(SUBMISSION_AGGREGATE_TYPE)
+                .aggregateId(submission.id())
+                .aggregateVersion(aggregateVersion)
+                .sequence(0)
+                .actor(EventActor.system("eia-policy-expert"))
+                .subject(EventSubject.of(VERTICAL, SUBMISSION_SUBJECT_TYPE, submission.id(),
+                        submission.submissionNumber()))
+                .links(List.of())
+                .data(data)
+                .metadata(EventMetadata.v1(SOURCE_BUILD))
+                .build();
     }
 
     private static EventEnvelope legalEntityEnvelope(LegalEntity legalEntity, String eventType,

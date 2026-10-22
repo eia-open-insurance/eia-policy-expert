@@ -209,6 +209,35 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   `adjustmentAmount`, `newTotalPremium`, `installmentId`, `installmentNumber`,
   `dueDate`, `reason`) in the same transaction.
 
+- Underwriting submission slice: idempotent `underwriting_submission` table with
+  a tenant-unique `submission_number`, applicant/product/requested term and
+  limit, a PostgreSQL `text[]` of tort codes, optional notes, a `version`, and
+  the `RECEIVED`/`REFERRED`/`QUOTED`/`BOUND`/`DECLINED`/`WITHDRAWN` status
+  check. `submission_number` is `SUB-{YYYY}-{7 digits}` from the locked
+  per-tenant `underwriting_submission_number_seq` counter, so numbering restarts
+  at one per tenant and concurrent creates cannot collide.
+- `GET`/`POST /api/v1/policies/submissions` and
+  `GET /api/v1/policies/submissions/{id}` (each also under `/internal/v1`) with
+  tenant-header/query scoping, the DIRECT-book gate, newest-update-first
+  ordering, case-insensitive `q` across submission number/product/notes, and an
+  optional `status` filter.
+- `PATCH /api/v1/policies/submissions/{id}/status` accepts `{status, reason?}`
+  and enforces the one-way graph `RECEIVED -> REFERRED/QUOTED/DECLINED/WITHDRAWN`,
+  `REFERRED -> QUOTED/DECLINED/WITHDRAWN`, and
+  `QUOTED -> BOUND/DECLINED/WITHDRAWN`, with `BOUND`/`DECLINED`/`WITHDRAWN`
+  terminal. Out-of-order/terminal transitions are `409
+  INVALID_SUBMISSION_TRANSITION`; a concurrent change is `409
+  CONCURRENT_MODIFICATION`; every accepted transition bumps the version and
+  returns the new `ETag`.
+- Submission validation caps product code at 64, the requested-limit currency at
+  three letters, the limit at non-negative, tort codes at 20 entries of 32
+  characters, notes at 2000 characters, and the optional reason at 500
+  characters.
+- `policy.submission.created` and `policy.submission.status-changed` outbox
+  events written in the same transaction as the submission row; the
+  status-changed payload carries the previous/new status, version, updated time,
+  and optional reason.
+
 ### Fixed
 
 - Positive premium adjustments compare the policy premium with the billing

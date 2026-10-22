@@ -172,6 +172,36 @@ class SchemaContractTest {
     }
 
     @Test
+    void schemaDefinesUnderwritingSubmissionsWithPerTenantNumbersAndLifecycleChecks()
+            throws Exception {
+        String schema = schema();
+
+        assertThat(schema).contains("CREATE TABLE IF NOT EXISTS underwriting_submission");
+        assertThat(schema).contains(
+                "CREATE TABLE IF NOT EXISTS underwriting_submission_number_seq");
+        assertThat(schema).contains("submission_number VARCHAR(32) NOT NULL");
+        assertThat(schema).contains("applicant_party_id UUID NOT NULL");
+        assertThat(schema).contains("product_code VARCHAR(64) NOT NULL");
+        assertThat(schema).contains("requested_effective_date DATE NOT NULL");
+        assertThat(schema).contains("requested_limit_amount NUMERIC(19,4) NOT NULL");
+        assertThat(schema).contains("requested_limit_currency CHAR(3) NOT NULL");
+        assertThat(schema).contains("tort_codes TEXT[] NOT NULL");
+        assertThat(schema).contains("notes VARCHAR(2000)");
+        assertThat(schema).contains(
+                "CONSTRAINT uq_underwriting_submission_number\n"
+                        + "        UNIQUE (tenant_id, submission_number)");
+        assertThat(schema).contains(
+                "CONSTRAINT ck_underwriting_submission_limit\n"
+                        + "        CHECK (requested_limit_amount >= 0)");
+        assertThat(schema).contains(
+                "CONSTRAINT ck_underwriting_submission_status CHECK (status IN (");
+        assertThat(schema).contains(
+                "'RECEIVED', 'REFERRED', 'QUOTED', 'BOUND', 'DECLINED', 'WITHDRAWN'");
+        assertThat(schema).contains("idx_underwriting_submission_tenant_updated");
+        assertThat(schema).contains("idx_underwriting_submission_tenant_status");
+    }
+
+    @Test
     void schemaIndexesTheTenantWideReceivableScan() throws Exception {
         String schema = schema();
 

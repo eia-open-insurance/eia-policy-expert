@@ -699,6 +699,46 @@ CREATE TABLE IF NOT EXISTS policy_rating_worksheet (
 CREATE INDEX IF NOT EXISTS idx_policy_rating_worksheet_policy
     ON policy_rating_worksheet (tenant_id, policy_id, created_at DESC, id);
 
+-- H2-compatible copy of underwriting submission intake. H2 spells the
+-- PostgreSQL text[] column as TEXT ARRAY; the CHECK constraints mirror the
+-- production DDL.
+CREATE TABLE IF NOT EXISTS underwriting_submission_number_seq (
+    tenant_id UUID PRIMARY KEY,
+    next_value BIGINT NOT NULL,
+    CONSTRAINT ck_underwriting_submission_number_seq CHECK (next_value >= 1)
+);
+
+CREATE TABLE IF NOT EXISTS underwriting_submission (
+    id UUID PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    submission_number VARCHAR(32) NOT NULL,
+    applicant_party_id UUID NOT NULL,
+    product_code VARCHAR(64) NOT NULL,
+    requested_effective_date DATE NOT NULL,
+    requested_limit_amount NUMERIC(19,4) NOT NULL,
+    requested_limit_currency CHAR(3) NOT NULL,
+    tort_codes TEXT ARRAY NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    notes VARCHAR(2000),
+    version INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    CONSTRAINT uq_underwriting_submission_number
+        UNIQUE (tenant_id, submission_number),
+    CONSTRAINT ck_underwriting_submission_limit
+        CHECK (requested_limit_amount >= 0),
+    CONSTRAINT ck_underwriting_submission_currency
+        CHECK (CHAR_LENGTH(TRIM(requested_limit_currency)) = 3),
+    CONSTRAINT ck_underwriting_submission_status CHECK (status IN (
+        'RECEIVED', 'REFERRED', 'QUOTED', 'BOUND', 'DECLINED', 'WITHDRAWN'
+    ))
+);
+
+CREATE INDEX IF NOT EXISTS idx_underwriting_submission_tenant_updated
+    ON underwriting_submission (tenant_id, updated_at DESC, id);
+CREATE INDEX IF NOT EXISTS idx_underwriting_submission_tenant_status
+    ON underwriting_submission (tenant_id, status, updated_at DESC, id);
+
 -- H2-compatible copy of the PostgreSQL outbox table. JSON payloads are TEXT
 -- here; production DDL uses jsonb.
 CREATE TABLE IF NOT EXISTS outbox_event (

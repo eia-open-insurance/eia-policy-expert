@@ -72,6 +72,12 @@ contract structures from SPEC 11.2:
   jurisdiction, optional regulator and license number, and ACTIVE/INACTIVE
   status. `policy.legal_entity_id` is a nullable FK to the catalog, so a policy
   can be assigned to or cleared from one issuing legal entity.
+- `underwriting_submission`: tenant-owned intake records with a per-tenant
+  `SUB-{YYYY}-{7 digits}` number, applicant/product/requested term and limit,
+  a PostgreSQL `text[]` of tort codes, optional notes, and the
+  RECEIVED/REFERRED/QUOTED/BOUND/DECLINED/WITHDRAWN lifecycle. The number
+  counter is a locked per-tenant row, so numbering restarts at one for each
+  tenant and stays collision-free.
 - Policy renewal lineage: `policy.renewed_from_policy_id` points a renewal DRAFT
   at the term it replaces. Renewal copies the source product, insured, coverage
   grants, limits, insureds, and locations into the new term without mutating the
@@ -83,7 +89,8 @@ contract structures from SPEC 11.2:
   `mass-tort-profile.updated`, `credit-note.created`, `credit-note.issued`,
   `credit-note.applied`, `credit-note.cancelled`, `credit-note.reversed`,
   `program.created`, `policy.program-assigned`, `legal-entity.created`,
-  `policy.legal-entity-assigned`), with conditional Quartz HTTP dispatch.
+  `policy.legal-entity-assigned`, `submission.created`,
+  `submission.status-changed`), with conditional Quartz HTTP dispatch.
 
 Every second-slice mutation accepts an optional `If-Match` strong entity tag
 (the aggregate `version`), returns the new `ETag`, and accepts an optional
@@ -284,6 +291,36 @@ aggregate; assignment and clearing write
 `policy.policy.legal-entity-assigned` with `legalEntityId` set or `null` in the
 same transaction as the policy version bump. A legal entity id from another
 tenant is a `404 LEGAL_ENTITY_NOT_FOUND`.
+
+Underwriting submissions are exposed under `/api/v1/policies/submissions` (the
+same controller keeps the `/internal/v1` alias for the domain adapter):
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/v1/policies/submissions` | Tenant-scoped submission list, newest update first; optional `q` (submission number/product/notes substring) and `status` filters |
+| `POST` | `/api/v1/policies/submissions` | Create a `RECEIVED` submission; `201` with the generated `submissionNumber` |
+| `GET` | `/api/v1/policies/submissions/{id}` | One submission; `404 SUBMISSION_NOT_FOUND` |
+| `PATCH` | `/api/v1/policies/submissions/{id}/status` | Apply `{status, reason?}`; returns the updated submission with its new `ETag`, `409 INVALID_SUBMISSION_TRANSITION` for an out-of-order or terminal transition |
+
+The create body is `{applicantPartyId, productCode, requestedEffectiveDate,
+requestedLimitAmount, requestedLimitCurrency, tortCodes[], notes?}`. The product
+code is capped at 64 characters, the currency is a three-letter ISO 4217 code
+(stored upper-case), the limit is non-negative, `tortCodes` holds at most 20
+codes of at most 32 characters each, and notes are capped at 2000 characters.
+`tortCodes` is a PostgreSQL `text[]`; a missing list is stored as an empty array
+and blank notes as `null`. The tenant comes from `?tenantId=` or
+`X-EIA-Tenant`, and the route is fixed to the DIRECT book.
+
+The status graph is `RECEIVED -> REFERRED/QUOTED/DECLINED/WITHDRAWN`,
+`REFERRED -> QUOTED/DECLINED/WITHDRAWN`, and
+`QUOTED -> BOUND/DECLINED/WITHDRAWN`; `BOUND`, `DECLINED`, and `WITHDRAWN` are
+terminal. An accepted create writes `policy.submission.created`; every accepted
+transition bumps the submission version and writes
+`policy.submission.status-changed` (`submissionId`, `submissionNumber`,
+`applicantPartyId`, `productCode`, `previousStatus`, `status`, `version`,
+`updatedAt`, `reason`). The optional reason is trimmed, capped at 500
+characters, and carried on the event as the audit explanation. A submission from
+another tenant is `404 SUBMISSION_NOT_FOUND`.
 
 Credit notes are exposed under `/api/v1/policies/{policyId}/credit-notes` (the
 same controller keeps the `/internal/v1` alias for the domain adapter):

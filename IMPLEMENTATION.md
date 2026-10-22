@@ -17,7 +17,9 @@ the nullable `policy.program_id` assignment), a legal entity catalog slice (tena
 upper-case codes plus the nullable `policy.legal_entity_id` assignment), and a
 credit note slice (DRAFT/ISSUED/APPLIED/CANCELLED/REVERSED billing adjustments
 with per-policy numbering, cancellation return-premium links, application to open
-installments, and credit reversal) from SPEC 11.2. A premium audit command
+installments, and credit reversal), and an underwriting submission slice
+(per-tenant numbered intake records with a one-way RECEIVED-to-terminal status
+graph and the submission outbox events) from SPEC 11.2. A premium audit command
 replaces the policy premium, issues a `PREMIUM_AUDIT` endorsement and version,
 and writes `policy.policy.premium-audited` for a bound or in-force term. A rating
 worksheet command calculates and persists a reproducible premium for a DRAFT or
@@ -47,7 +49,8 @@ outbox (SPEC 7.5.1) in the same database transaction as the aggregate write.
 | `MassTortProfileController` / `MassTortProfileService` / `MassTortProfileRepository` | One-profile-per-policy upsert, COMPLETE gating, and the profile outbox event |
 | `PolicyProgramController` / `PolicyProgramService` / `PolicyProgramRepository` | Commercial program catalog, optional capacity with the derived usage projection, policy assignment/clear, and the program outbox events |
 | `LegalEntityController` / `LegalEntityService` / `LegalEntityRepository` | Legal entity catalog, policy assignment/clear, and the legal entity outbox events |
-| `PolicyRules`, `VersionTimeline`, `CoverageRules`, `CancellationRules`, `CancellationMath`, `PartyRules`, `EndorsementRules`, `BillingRules`, `CreditNoteRules`, `MassTortProfileRules`, `ProgramRules`, `LegalEntityRules`, `RatingRules` | Pure invariants with focused unit tests |
+| `UnderwritingSubmissionController` / `UnderwritingSubmissionService` / `UnderwritingSubmissionRepository` / `UnderwritingSubmissionNumberAllocator` | Tenant-numbered underwriting submissions, q/status reads, the one-way status graph, and the submission outbox events |
+| `PolicyRules`, `VersionTimeline`, `CoverageRules`, `CancellationRules`, `CancellationMath`, `PartyRules`, `EndorsementRules`, `BillingRules`, `CreditNoteRules`, `MassTortProfileRules`, `ProgramRules`, `LegalEntityRules`, `RatingRules`, `UnderwritingSubmissionRules` | Pure invariants with focused unit tests |
 | `PolicyVersionHasher`, `VersionIssuer` | Canonical version snapshot hash and issuance |
 | `CommandIdempotency` | Per-command replay/conflict behaviour |
 | `PolicyEvents`, `PolicyOutboxSchedulingConfiguration` | Canonical event envelopes and the Quartz outbox dispatch job |
@@ -86,6 +89,8 @@ aggregate change and the event row:
 | `PATCH /api/v1/policies/{id}/program` (also `/internal/v1` alias) | `policy.policy.program-assigned`; `programId` is null when the link is cleared, and every accepted command advances the policy version |
 | `POST /api/v1/legal-entities` (also `/internal/v1` alias) | `policy.legal-entity.created` against the `LegalEntity` aggregate |
 | `PATCH /api/v1/policies/{id}/legal-entity` (also `/internal/v1` alias) | `policy.policy.legal-entity-assigned`; `legalEntityId` is null when the link is cleared, and every accepted command advances the policy version |
+| `POST /api/v1/policies/submissions` (also `/internal/v1` alias) | `policy.submission.created` against the `UnderwritingSubmission` aggregate |
+| `PATCH /api/v1/policies/submissions/{id}/status` (also `/internal/v1` alias) | `policy.submission.status-changed`; the payload carries the previous and new status and the optional reason, and every accepted transition advances the submission version |
 
 Payloads carry `policyId`, `policyNumber`, `status`, `version`, the policy
 effective/expiration dates, premium and limit amounts as scale-4 decimal
@@ -162,6 +167,18 @@ emitted against the `LegalEntity` aggregate (`aggregateVersion=1`, payload
 Neither name is listed in `eia-contracts/asyncapi/policy.yaml` or
 `event-catalog.yaml` yet, and the contract still marks `/legal-entities` as
 planned.
+
+The underwriting submission events are additive too: `policy.submission.created`
+and `policy.submission.status-changed` are not listed in
+`eia-contracts/asyncapi/policy.yaml` or `event-catalog.yaml` yet. A submission
+is its own aggregate, so the rows carry `aggregateType=UnderwritingSubmission`
+and `aggregateVersion=1` on create (then one higher per accepted transition);
+the subject type is `underwriting-submission`. The created payload carries the
+submission number, applicant, product, requested date/limit/currency, tort
+codes, notes, `RECEIVED` status, and timestamps. The status-changed payload
+carries `submissionId`, `submissionNumber`, `applicantPartyId`, `productCode`,
+`previousStatus`, `status`, `version`, `updatedAt`, and `reason` (explicitly
+null when absent).
 
 The credit note events are additive too: `policy.credit-note.created`,
 `policy.credit-note.issued`, `policy.credit-note.applied`,
@@ -328,6 +345,62 @@ RATING_WORKSHEET_NOT_FOUND` when the policy has never been rated. Every read and
 write is tenant scoped, and a policy from another tenant is a `404
 POLICY_NOT_FOUND`.
 
+## Underwriting submissions
+
+`underwriting_submission` is a tenant-owned intake aggregate that exists before
+a policy. The server allocates `submission_number` as `SUB-{YYYY}-{7 digits}`
+from `underwriting_submission_number_seq`, a per-tenant counter row locked with
+`SELECT ... FOR UPDATE`; `(tenant_id, submission_number)` is unique. The counter
+is advanced in its own short transaction, so a rollback of the submission
+insert leaves a gap exactly like a database sequence. A first-ever create for a
+tenant can race on the counter-row insert; the losing transaction rolls back and
+the service retries against the committed row.
+
+The create body is `{applicantPartyId, productCode, requestedEffectiveDate,
+requestedLimitAmount, requestedLimitCurrency, tortCodes[], notes?}`. A new
+submission is `RECEIVED` with `version=0`; `createdAt` and `updatedAt` are
+server-owned and microsecond-truncated. The caps are product code 64, currency
+three ISO 4217 letters (stored upper-case), non-negative limit, at most 20 tort
+codes of at most 32 characters each, and notes at most 2000 characters. Blank
+tort-code entries are rejected; a missing tort-code list stores an empty array
+and blank notes store null. Bean Validation enforces the same caps at the HTTP
+boundary and `UnderwritingSubmissionRules` re-checks them for direct service
+calls before the number is allocated.
+
+`GET /api/v1/policies/submissions` lists newest-updated first with an optional
+`q` (case-insensitive substring over submission number, product code, and notes)
+and an optional `status`; an unknown status is `400 INVALID_SUBMISSION_STATUS`.
+`GET /api/v1/policies/submissions/{id}` is tenant-scoped, so a submission from
+another tenant is `404 SUBMISSION_NOT_FOUND`. Both routes are also exposed under
+`/internal/v1/policies/submissions` for the domain adapter, and all reads/writes
+use the `?tenantId=` or `X-EIA-Tenant` scope with the DIRECT-book gate.
+
+`PATCH /api/v1/policies/submissions/{id}/status` accepts `{status, reason?}`.
+The graph is:
+
+```
+RECEIVED  -> REFERRED, QUOTED, DECLINED, WITHDRAWN
+REFERRED  -> QUOTED, DECLINED, WITHDRAWN
+QUOTED    -> BOUND, DECLINED, WITHDRAWN
+BOUND, DECLINED, WITHDRAWN -> terminal
+```
+
+An out-of-order or terminal transition is `409 INVALID_SUBMISSION_TRANSITION`
+with `submissionId`, `currentStatus`, and `targetStatus` in `meta`; an unknown
+status value is `400 INVALID_SUBMISSION_STATUS`. The optional reason is trimmed
+and capped at 500 characters. The aggregate stores the resulting status and
+increments `version` (and `updatedAt`); the reason is carried on the
+`policy.submission.status-changed` event as the audit explanation. The update
+predicate includes the version and current status read by the command, so a
+concurrent winner is `409 CONCURRENT_MODIFICATION` and neither the row nor an
+event is written by the loser. Every accepted transition returns the updated
+submission with `ETag: "<version>"`.
+
+The accepted create writes `policy.submission.created` and each accepted
+transition writes `policy.submission.status-changed` in the same transaction as
+the submission row, so a rollback leaves neither the aggregate change nor the
+event behind. Both event names are additive contract entries, reported above.
+
 ## Verification
 
 ```powershell
@@ -403,3 +476,11 @@ The live smoke is opt-in and requires PostgreSQL.
   `CALCULATED`. Rating is not required before quote or bind, and the rating
   command has no `Idempotency-Key` replay (each accepted command appends a
   worksheet).
+- Underwriting submissions are an intake record only. The SPEC 11.2.14
+  `clearance`, `referral`, `underwriting_authority`, `declination`,
+  `policy_quote`, product/form library, eligibility rules, exposure/coverage
+  detail, and submission-to-policy conversion commands are not exposed. The
+  status vocabulary is the requested slice graph; the SPEC `CLEARANCE` and
+  `RATING` intermediate states are not modelled. There is no submission edit or
+  delete command, no status history table (the reason lives on the event), and
+  no `If-Match` or `Idempotency-Key` replay on the submission commands.
