@@ -150,18 +150,22 @@ public class BillingService {
 
     /**
      * Appends one DUE installment for the positive premium remainder between the
-     * policy written premium and the ACTIVE plan total, then moves the plan
-     * total premium up by the same amount and grows the installment count by
-     * one. A plan that is absent is a 404 and a plan that is not ACTIVE is a
-     * 409; a zero or negative remainder is a 400 {@code NO_PREMIUM_ADJUSTMENT}
-     * because a decrease is a credit-note concern, not an installment. The
-     * 1..24 schedule window is enforced before the append.
+     * policy written premium and the ACTIVE plan's net premium, then moves the
+     * plan total premium up by the same amount and grows the installment count by
+     * one. The net premium is the plan total less the credits already applied to
+     * its installments, floored at zero, so credits that reduce the collectible
+     * schedule let a following adjustment bill only the remaining gap. A plan
+     * that is absent is a 404 and a plan that is not ACTIVE is a 409; a zero or
+     * negative remainder is a 400 {@code NO_PREMIUM_ADJUSTMENT} because a
+     * decrease is a credit-note concern, not an installment. The 1..24 schedule
+     * window is enforced before the append.
      *
-     * <p>The plan update is conditional on the total/count the command read, so
-     * a concurrent adjustment or plan closure makes it return zero and the
-     * whole transaction (including the appended installment) rolls back. The
-     * policy version bump and {@code policy.billing-plan.adjusted} commit with
-     * the plan and installment rows.</p>
+     * <p>The plan update is conditional on the total, count, and credited total
+     * the command read, so a concurrent adjustment, credit, or plan closure
+     * makes it return zero and the whole transaction (including the appended
+     * installment) rolls back. The policy version bump and
+     * {@code policy.billing-plan.adjusted} commit with the plan and installment
+     * rows.</p>
      */
     @Transactional
     public BillingAdjustmentView adjust(UUID tenantId, UUID policyId,
@@ -170,7 +174,9 @@ public class BillingService {
         PolicyBillingPlan plan = billingRepository.findCurrentPlan(tenantId, policyId)
                 .orElseThrow(() -> PolicyErrors.notFound("BILLING_PLAN_NOT_FOUND", "policyId",
                         "No billing plan exists for policy: " + policyId));
-        BillingRules.AdjustmentSpec spec = BillingRules.validateAdjustment(request, policy, plan);
+        BigDecimal creditedAmount = billingRepository.sumCreditedAmount(tenantId, plan.id());
+        BillingRules.AdjustmentSpec spec = BillingRules.validateAdjustment(request, policy, plan,
+                creditedAmount);
 
         Instant now = Instant.now().truncatedTo(ChronoUnit.MICROS);
         PolicyInstallment installment = new PolicyInstallment(UUID.randomUUID(), tenantId,
@@ -179,7 +185,7 @@ public class BillingService {
 
         int rows = billingRepository.updatePlanAfterAdjustment(tenantId, policyId, plan.id(),
                 spec.newTotalPremium(), spec.installmentNumber(), plan.totalPremium(),
-                plan.installmentCount());
+                plan.installmentCount(), creditedAmount);
         if (rows == 0) {
             throw PolicyErrors.conflict("CONCURRENT_MODIFICATION", "policyId",
                     "The billing plan changed concurrently; reload and retry.");

@@ -74,9 +74,11 @@ final class BillingRules {
     }
 
     /**
-     * Validates a positive premium adjustment against the ACTIVE plan. The
-     * appended amount is the policy written premium less the plan total, so the
-     * plan always catches up to the policy premium. A non-positive remainder is
+     * Validates a positive premium adjustment against the ACTIVE plan and the
+     * credits already applied to its schedule. The appended amount is the policy
+     * written premium less the plan's net premium (its total less the applied
+     * credits, floored at zero), so the plan's net premium always catches up to
+     * the policy premium. A non-positive remainder is
      * {@code NO_PREMIUM_ADJUSTMENT}; a premium decrease must use a credit note.
      *
      * <p>The 1..24 installment window is checked before the money remainder so a
@@ -86,7 +88,8 @@ final class BillingRules {
      * required, trimmed, and capped at 500 characters.</p>
      */
     static AdjustmentSpec validateAdjustment(BillingAdjustmentRequest request, Policy policy,
-                                             PolicyBillingPlan plan) {
+                                             PolicyBillingPlan plan,
+                                             BigDecimal creditedAmount) {
         if (request == null) {
             throw PolicyErrors.badRequest("INVALID_BILLING_ADJUSTMENT", "request",
                     "A billing adjustment request is required.");
@@ -118,24 +121,43 @@ final class BillingRules {
                             + policy.effectiveDate() + ".");
         }
         String reason = normalizeAdjustmentReason(request.reason());
-        BigDecimal adjustmentAmount = adjustmentDelta(policy, plan);
+        BigDecimal credited = creditedAmount == null
+                ? Money.of(BigDecimal.ZERO) : Money.of(creditedAmount);
+        BigDecimal adjustmentAmount = adjustmentDelta(policy, plan, credited);
         if (adjustmentAmount.signum() <= 0) {
+            BigDecimal netPlanPremium = netPlanPremium(plan, credited);
             throw PolicyErrors.badRequest("NO_PREMIUM_ADJUSTMENT", "delta",
-                    "The policy premium does not exceed the billing plan total by a positive"
-                            + " amount; a premium decrease must be handled with a credit note.",
+                    "The policy premium does not exceed the billing plan's net premium by a"
+                            + " positive amount; a premium decrease must be handled with a credit"
+                            + " note.",
                     Map.of("delta", adjustmentAmount.toPlainString(),
                             "policyPremiumAmount", Money.of(policy.premiumAmount()).toPlainString(),
                             "planTotalPremium",
-                            Money.of(plan.totalPremium()).toPlainString()));
+                            Money.of(plan.totalPremium()).toPlainString(),
+                            "creditedAmount", credited.toPlainString(),
+                            "netPlanPremium", netPlanPremium.toPlainString()));
         }
         BigDecimal newTotalPremium = Money.of(plan.totalPremium().add(adjustmentAmount));
         return new AdjustmentSpec(adjustmentAmount, newTotalPremium,
                 plan.installmentCount() + 1, dueDate, reason);
     }
 
-    /** The positive premium remainder the adjustment bills. */
-    static BigDecimal adjustmentDelta(Policy policy, PolicyBillingPlan plan) {
-        return Money.of(policy.premiumAmount()).subtract(Money.of(plan.totalPremium()));
+    /** The positive premium remainder the adjustment bills, net of applied credits. */
+    static BigDecimal adjustmentDelta(Policy policy, PolicyBillingPlan plan,
+                                      BigDecimal creditedAmount) {
+        return Money.of(policy.premiumAmount()).subtract(netPlanPremium(plan, creditedAmount));
+    }
+
+    /**
+     * The plan premium net of the credits already applied to its schedule,
+     * floored at zero: credits can cover the scheduled total but can never make
+     * the collectible plan premium negative.
+     */
+    static BigDecimal netPlanPremium(PolicyBillingPlan plan, BigDecimal creditedAmount) {
+        BigDecimal credited = creditedAmount == null
+                ? Money.of(BigDecimal.ZERO) : Money.of(creditedAmount);
+        BigDecimal net = Money.of(plan.totalPremium()).subtract(credited);
+        return net.signum() < 0 ? Money.of(BigDecimal.ZERO) : net;
     }
 
     static String normalizeAdjustmentReason(String raw) {

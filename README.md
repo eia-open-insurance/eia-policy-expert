@@ -156,7 +156,7 @@ controller keeps the `/internal/v1` alias for the domain adapter):
 |---|---|---|
 | `GET` | `/api/v1/policies/{policyId}/billing` | ACTIVE (else latest) plan, its installments, and the money summary; `404` when none |
 | `POST` | `/api/v1/policies/{policyId}/billing` | Create the plan and split the policy premium; `201`, `409` when an ACTIVE plan exists |
-| `POST` | `/api/v1/policies/{policyId}/billing/adjustment` | Append one `DUE` installment for the positive `policy.premiumAmount - plan.totalPremium` remainder; `201`, `400 NO_PREMIUM_ADJUSTMENT` when the remainder is not positive, `404` without a plan, `409` for a non-ACTIVE plan or a full 24-installment schedule |
+| `POST` | `/api/v1/policies/{policyId}/billing/adjustment` | Append one `DUE` installment for the positive `policy.premiumAmount - netPlanPremium` remainder, where `netPlanPremium` is the plan total less the sum of applied installment credits (floored at zero); `201`, `400 NO_PREMIUM_ADJUSTMENT` when the remainder is not positive, `404` without a plan, `409` for a non-ACTIVE plan or a full 24-installment schedule |
 | `PATCH` | `/api/v1/policies/{policyId}/billing/installments/{installmentId}` | Settle as `PAID` or `WAIVED`; same-status replay is a no-op, terminal-status (including `CREDITED`) switch is `409` |
 
 The plan response is `{"plan": {...}, "installments": [...], "summary": {...}}`.
@@ -174,21 +174,27 @@ A positive premium adjustment is a `POST` to
 `{dueDate, reason}`. The command requires an `ACTIVE` plan (`404
 BILLING_PLAN_NOT_FOUND` when the policy has none, `409
 BILLING_PLAN_NOT_ACTIVE` when the latest plan is closed) and derives the amount
-instead of accepting one: `delta = policy.premiumAmount - plan.totalPremium`.
-The delta must be positive; zero and negative remainders are `400
+instead of accepting one from the plan's net premium:
+`netPlanPremium = max(plan.totalPremium - sum(installment.creditedAmount), 0)`
+and `delta = policy.premiumAmount - netPlanPremium`. Applied credits therefore
+reduce what the schedule still has to collect, so a credit that follows a
+premium reduction lets the two sides align instead of leaving a phantom
+remainder. The delta must be positive; zero and negative remainders are `400
 NO_PREMIUM_ADJUSTMENT` because a premium decrease belongs to credit notes. A
 `dueDate` is required and may not precede the policy effective date (the
 effective date itself is allowed), `reason` is required and capped at 500
 characters, and the plan may not grow past 24 installments (`409
 MAX_INSTALLMENTS_REACHED`). An accepted command appends one `DUE` installment
-with the next number and the derived amount, moves `plan.totalPremium` to the
-policy premium and `plan.installmentCount` up by one, bumps the policy version,
-and returns `201` with `{plan, installment, adjustmentAmount,
-newTotalPremium}`. The same transaction writes `policy.billing-plan.adjusted`
-with `policyId`, `policyNumber`, `planId`, `adjustmentAmount`,
-`newTotalPremium`, `installmentId`, `installmentNumber`, `dueDate`, and
-`reason`; the plan update is conditional on the totals the command read, so a
-concurrent adjustment or plan closure rolls the appended installment back.
+with the next number and the derived amount, moves `plan.totalPremium` up by the
+delta (gross, so the plan's net premium equals the policy premium after the
+append) and `plan.installmentCount` up by one, bumps the policy version, and
+returns `201` with `{plan, installment, adjustmentAmount, newTotalPremium}`. The
+same transaction writes `policy.billing-plan.adjusted` with `policyId`,
+`policyNumber`, `planId`, `adjustmentAmount`, `newTotalPremium`,
+`installmentId`, `installmentNumber`, `dueDate`, and `reason`; the plan update
+is conditional on the totals and credited sum the command read, so a concurrent
+adjustment, credit application, or plan closure rolls the appended installment
+back.
 
 Dunning is exposed under the tenant-wide billing path (the same controller keeps
 the `/internal/v1` alias for the domain adapter):

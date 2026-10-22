@@ -123,23 +123,44 @@ public class BillingRepository {
 
     /**
      * Applies the plan-side change for a positive premium adjustment: the total
-     * premium catches up to the policy premium and the installment count grows
-     * by one. The expected total/count are the values the command read, so a
-     * concurrent adjustment makes this return zero and the caller rolls the
-     * appended installment back. The ACTIVE predicate keeps a concurrently
-     * closed plan from being adjusted.
+     * premium grows by the adjustment amount and the installment count grows by
+     * one. The expected total/count/credited total are the values the command
+     * read, so a concurrent adjustment, credit, or plan closure makes this
+     * return zero and the caller rolls the appended installment back. The ACTIVE
+     * predicate keeps a concurrently closed plan from being adjusted.
      */
     public int updatePlanAfterAdjustment(UUID tenantId, UUID policyId, UUID planId,
                                          BigDecimal newTotalPremium, int newInstallmentCount,
                                          BigDecimal expectedTotalPremium,
-                                         int expectedInstallmentCount) {
+                                         int expectedInstallmentCount,
+                                         BigDecimal expectedCreditedAmount) {
         return jdbc.update("""
                 UPDATE policy_billing_plan
                    SET total_premium = ?, installment_count = ?
                  WHERE tenant_id = ? AND policy_id = ? AND id = ? AND status = 'ACTIVE'
                    AND total_premium = ? AND installment_count = ?
+                   AND (SELECT COALESCE(SUM(credited_amount), 0)
+                          FROM policy_installment
+                         WHERE tenant_id = ? AND plan_id = ?) = ?
                 """, newTotalPremium, newInstallmentCount, tenantId, policyId, planId,
-                expectedTotalPremium, expectedInstallmentCount);
+                expectedTotalPremium, expectedInstallmentCount, tenantId, planId,
+                expectedCreditedAmount);
+    }
+
+    /**
+     * The sum of every credit already applied to the plan's installments. The
+     * adjustment command subtracts it from the plan total to compare the plan's
+     * net premium with the policy written premium, so an appended installment
+     * bills only what the credits have not already covered. A plan without
+     * credits is zero.
+     */
+    public BigDecimal sumCreditedAmount(UUID tenantId, UUID planId) {
+        BigDecimal credited = jdbc.queryForObject("""
+                SELECT COALESCE(SUM(credited_amount), 0)
+                  FROM policy_installment
+                 WHERE tenant_id = ? AND plan_id = ?
+                """, BigDecimal.class, tenantId, planId);
+        return credited == null ? Money.of(BigDecimal.ZERO) : Money.of(credited);
     }
 
     public Optional<PolicyBillingPlan> findActivePlan(UUID tenantId, UUID policyId) {

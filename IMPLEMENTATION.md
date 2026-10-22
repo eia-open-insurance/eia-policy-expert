@@ -257,13 +257,17 @@ read keeps `amount` gross but sums `outstandingAmount` into `totalAmount` and
 
 `POST /api/v1/policies/{policyId}/billing/adjustment` (and the `/internal/v1`
 alias) accepts `{dueDate, reason}` and bills the positive gap between the policy
-written premium and the ACTIVE plan total: `delta = policy.premiumAmount -
-plan.totalPremium`. It is a 404 `BILLING_PLAN_NOT_FOUND` when the policy has no
-plan and a 409 `BILLING_PLAN_NOT_ACTIVE` when the latest plan is closed. A zero
-or negative delta is a 400 `NO_PREMIUM_ADJUSTMENT` with `delta`,
-`policyPremiumAmount`, and `planTotalPremium` metadata, because a premium
-decrease is a credit-note concern. The 24-installment ceiling is checked before
-the money remainder, so a full schedule reports 409
+written premium and the ACTIVE plan's net premium:
+`netPlanPremium = max(plan.totalPremium - sum(installment.credited_amount), 0)`
+and `delta = policy.premiumAmount - netPlanPremium`. It is a 404
+`BILLING_PLAN_NOT_FOUND` when the policy has no plan and a 409
+`BILLING_PLAN_NOT_ACTIVE` when the latest plan is closed. A zero or negative
+delta is a 400 `NO_PREMIUM_ADJUSTMENT` with `delta`, `policyPremiumAmount`,
+`planTotalPremium`, `creditedAmount`, and `netPlanPremium` metadata, because a
+premium decrease is a credit-note concern. Applied credits reduce the plan's
+collectible premium, so a credit that follows a premium reduction lets the two
+sides align instead of making the command fail. The 24-installment ceiling is
+checked before the money remainder, so a full schedule reports 409
 `MAX_INSTALLMENTS_REACHED`. `dueDate` is required and may not precede the policy
 effective date (the effective date itself is accepted, which allows an inception
 adjustment); `reason` is required, trimmed, and capped at 500 characters.
@@ -271,11 +275,13 @@ adjustment); `reason` is required, trimmed, and capped at 500 characters.
 The accepted command appends one DUE installment with the derived amount, the
 next installment number, and the supplied due date, then applies the plan change
 with one conditional UPDATE that requires the plan to still be ACTIVE and its
-`total_premium`/`installment_count` to equal the values the command read. A
-concurrent adjustment or closure loses that comparison and rolls the appended
+`total_premium`/`installment_count` plus the schedule's total
+`credited_amount` to equal the values the command read. A concurrent adjustment,
+credit application, or closure loses that comparison and rolls the appended
 installment back; the `(plan_id, installment_number)` unique key is the second
-arbiter. The response is 201 with `{plan, installment, adjustmentAmount,
-newTotalPremium}`. The policy version bump and
+arbiter. The plan total moves up by the delta (gross), so the plan's net premium
+equals the policy premium after the append. The response is 201 with `{plan,
+installment, adjustmentAmount, newTotalPremium}`. The policy version bump and
 `policy.billing-plan.adjusted` (`policyId`, `policyNumber`, `planId`,
 `adjustmentAmount`, `newTotalPremium`, `installmentId`, `installmentNumber`,
 `dueDate`, `reason`) commit in the same transaction.

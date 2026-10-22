@@ -160,7 +160,8 @@ class BillingRulesTest {
     void validateAdjustmentDerivesThePositiveRemainderAndNextInstallment() {
         BillingRules.AdjustmentSpec spec = BillingRules.validateAdjustment(
                 new BillingAdjustmentRequest(LocalDate.of(2026, 5, 1), "  exposure audit  "),
-                policy("150000.00"), plan(new BigDecimal("120000.00"), 3, "ACTIVE"));
+                policy("150000.00"), plan(new BigDecimal("120000.00"), 3, "ACTIVE"),
+                BigDecimal.ZERO);
 
         assertThat(spec.adjustmentAmount()).isEqualByComparingTo("30000.0000");
         assertThat(spec.newTotalPremium()).isEqualByComparingTo("150000.0000");
@@ -170,11 +171,72 @@ class BillingRulesTest {
     }
 
     @Test
+    void validateAdjustmentBillsAgainstTheNetPlanPremiumAfterCredits() {
+        BillingRules.AdjustmentSpec partial = BillingRules.validateAdjustment(
+                new BillingAdjustmentRequest(LocalDate.of(2026, 5, 1), "credits applied"),
+                policy("150000.00"), plan(new BigDecimal("120000.00"), 3, "ACTIVE"),
+                new BigDecimal("20000.00"));
+
+        // Net plan premium is 100000, so the gross total moves to 170000 by the
+        // 50000 the credits have not already covered.
+        assertThat(partial.adjustmentAmount()).isEqualByComparingTo("50000.0000");
+        assertThat(partial.newTotalPremium()).isEqualByComparingTo("170000.0000");
+
+        BillingRules.AdjustmentSpec fullyCredited = BillingRules.validateAdjustment(
+                new BillingAdjustmentRequest(LocalDate.of(2026, 5, 1), "fully credited"),
+                policy("150000.00"), plan(new BigDecimal("120000.00"), 3, "ACTIVE"),
+                new BigDecimal("120000.00"));
+
+        assertThat(fullyCredited.adjustmentAmount()).isEqualByComparingTo("150000.0000");
+        assertThat(fullyCredited.newTotalPremium()).isEqualByComparingTo("270000.0000");
+
+        // Credits beyond the scheduled total cannot drive the net premium below
+        // zero, so the whole policy premium is still the remainder.
+        assertThat(BillingRules.netPlanPremium(plan(new BigDecimal("120000.00"), 3, "ACTIVE"),
+                new BigDecimal("150000.00"))).isEqualByComparingTo("0.0000");
+        assertThat(BillingRules.adjustmentDelta(policy("150000.00"),
+                plan(new BigDecimal("120000.00"), 3, "ACTIVE"), new BigDecimal("150000.00")))
+                .isEqualByComparingTo("150000.0000");
+    }
+
+    @Test
     void validateAdjustmentRejectsZeroAndNegativeRemainders() {
         assertAdjustmentRejected(policy("120000.00"), plan(new BigDecimal("120000.00"), 2, "ACTIVE"),
                 "NO_PREMIUM_ADJUSTMENT", HttpStatus.BAD_REQUEST, "delta");
         assertAdjustmentRejected(policy("100000.00"), plan(new BigDecimal("120000.00"), 2, "ACTIVE"),
                 "NO_PREMIUM_ADJUSTMENT", HttpStatus.BAD_REQUEST, "delta");
+    }
+
+    @Test
+    void validateAdjustmentRejectsNonPositiveRemaindersAgainstTheNetPlanPremium() {
+        assertThatThrownBy(() -> BillingRules.validateAdjustment(
+                new BillingAdjustmentRequest(LocalDate.of(2026, 5, 1), "audit"),
+                policy("100000.00"), plan(new BigDecimal("120000.00"), 3, "ACTIVE"),
+                new BigDecimal("20000.00")))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException api = (ApiException) ex;
+                    assertThat(api.status()).isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(api.code()).isEqualTo("NO_PREMIUM_ADJUSTMENT");
+                    assertThat(api.meta())
+                            .containsEntry("delta", "0.0000")
+                            .containsEntry("creditedAmount", "20000.0000")
+                            .containsEntry("netPlanPremium", "100000.0000")
+                            .containsEntry("planTotalPremium", "120000.0000")
+                            .containsEntry("policyPremiumAmount", "100000.0000");
+                });
+
+        assertThatThrownBy(() -> BillingRules.validateAdjustment(
+                new BillingAdjustmentRequest(LocalDate.of(2026, 5, 1), "audit"),
+                policy("90000.00"), plan(new BigDecimal("120000.00"), 3, "ACTIVE"),
+                new BigDecimal("20000.00")))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException api = (ApiException) ex;
+                    assertThat(api.status()).isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(api.code()).isEqualTo("NO_PREMIUM_ADJUSTMENT");
+                    assertThat(api.meta()).containsEntry("delta", "-10000.0000");
+                });
     }
 
     @Test
@@ -188,7 +250,8 @@ class BillingRulesTest {
     void validateAdjustmentAllowsTheTwentyFourthInstallment() {
         BillingRules.AdjustmentSpec spec = BillingRules.validateAdjustment(
                 new BillingAdjustmentRequest(LocalDate.of(2026, 5, 1), "growth"),
-                policy("150000.00"), plan(new BigDecimal("120000.00"), 23, "ACTIVE"));
+                policy("150000.00"), plan(new BigDecimal("120000.00"), 23, "ACTIVE"),
+                BigDecimal.ZERO);
 
         assertThat(spec.installmentNumber()).isEqualTo(24);
         assertThat(spec.adjustmentAmount()).isEqualByComparingTo("30000.0000");
@@ -218,7 +281,8 @@ class BillingRulesTest {
     void validateAdjustmentAllowsThePolicyEffectiveDate() {
         BillingRules.AdjustmentSpec spec = BillingRules.validateAdjustment(
                 new BillingAdjustmentRequest(LocalDate.of(2026, 1, 1), "inception correction"),
-                policy("150000.00"), plan(new BigDecimal("120000.00"), 2, "ACTIVE"));
+                policy("150000.00"), plan(new BigDecimal("120000.00"), 2, "ACTIVE"),
+                BigDecimal.ZERO);
 
         assertThat(spec.dueDate()).isEqualTo(LocalDate.of(2026, 1, 1));
     }
@@ -233,7 +297,8 @@ class BillingRulesTest {
     private static void assertAdjustmentRejected(Policy policy, PolicyBillingPlan plan,
                                                  BillingAdjustmentRequest request, String code,
                                                  HttpStatus status, String field) {
-        assertThatThrownBy(() -> BillingRules.validateAdjustment(request, policy, plan))
+        assertThatThrownBy(() -> BillingRules.validateAdjustment(request, policy, plan,
+                BigDecimal.ZERO))
                 .isInstanceOf(ApiException.class)
                 .satisfies(ex -> {
                     ApiException api = (ApiException) ex;

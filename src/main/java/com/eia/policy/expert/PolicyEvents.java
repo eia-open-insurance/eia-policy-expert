@@ -99,10 +99,11 @@ final class PolicyEvents {
 
     /**
      * A positive premium adjustment appends one DUE installment and moves the
-     * plan total premium up to the policy premium. The payload is the
-     * adjustment contract: the policy and plan identity, the appended amount,
-     * the resulting plan total, and the appended installment number, due date,
-     * and reason.
+     * plan total premium up by the adjustment amount, so the plan's net premium
+     * (total less applied credits) catches up to the policy premium. The payload
+     * is the adjustment contract: the policy and plan identity, the appended
+     * amount, the resulting gross plan total, and the appended installment
+     * number, due date, and reason.
      */
     static EventEnvelope billingPlanAdjusted(Policy policy, PolicyBillingPlan plan,
                                              PolicyInstallment installment,

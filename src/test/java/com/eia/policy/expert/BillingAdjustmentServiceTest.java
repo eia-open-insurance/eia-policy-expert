@@ -25,9 +25,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * End-to-end positive premium adjustment against H2: appending the derived
- * remainder installment, plan total/count movement, zero/negative preconditions,
- * missing and inactive plans, the 24-installment ceiling, tenant isolation, the
- * outbox payload, and transactional rollback.
+ * remainder installment, the net-plan-premium comparison after applied credits,
+ * plan total/count movement, zero/negative preconditions, missing and inactive
+ * plans, the 24-installment ceiling, tenant isolation, the outbox payload, and
+ * transactional rollback.
  */
 @SpringBootTest
 @ActiveProfiles("test")
@@ -42,6 +43,9 @@ class BillingAdjustmentServiceTest {
 
     @Autowired
     private BillingService billingService;
+
+    @Autowired
+    private CreditNoteService creditNoteService;
 
     @Autowired
     private PolicyService policyService;
@@ -154,6 +158,104 @@ class BillingAdjustmentServiceTest {
                 .containsEntry("installmentNumber", 3)
                 .containsEntry("dueDate", "2026-05-01")
                 .containsEntry("reason", "mid-term exposure increase");
+    }
+
+    @Test
+    void billsTheRemainderAboveTheNetPlanPremiumAfterCredits() {
+        Policy policy = createPolicy("POL-ADJ-0012", new BigDecimal("120000.00"));
+        billingService.create(TENANT, policy.id(),
+                new CreateBillingPlanRequest(3, "MONTHLY", FIRST_DUE));
+        applyCredit(policy, 1, new BigDecimal("12500.00"));
+        applyCredit(policy, 2, new BigDecimal("7500.00"));
+        raisePolicyPremium(policy.id(), new BigDecimal("150000.00"));
+
+        BillingAdjustmentView view = billingService.adjust(TENANT, policy.id(),
+                new BillingAdjustmentRequest(ADJUSTMENT_DUE, "credits already reduce the schedule"));
+
+        // Net plan premium is 120000 - 20000 = 100000, so the appended amount is
+        // 50000 and the gross plan total moves to 170000 (net 150000).
+        assertThat(view.adjustmentAmount()).isEqualByComparingTo("50000.0000");
+        assertThat(view.newTotalPremium()).isEqualByComparingTo("170000.0000");
+        assertThat(view.plan().totalPremium()).isEqualByComparingTo("170000.0000");
+        assertThat(view.plan().installmentCount()).isEqualTo(4);
+        assertThat(view.installment().installmentNumber()).isEqualTo(4);
+        assertThat(view.installment().amount()).isEqualByComparingTo("50000.0000");
+        assertThat(view.installment().creditedAmount()).isEqualByComparingTo("0.0000");
+        assertThat(view.installment().status()).isEqualTo("DUE");
+
+        BillingPlanView fetched = billingService.get(TENANT, policy.id());
+        assertThat(fetched.summary().totalAmount()).isEqualByComparingTo("170000.0000");
+        assertThat(fetched.summary().creditedAmount()).isEqualByComparingTo("20000.0000");
+        assertThat(fetched.summary().outstandingAmount()).isEqualByComparingTo("150000.0000");
+
+        String payload = (String) event("policy.billing-plan.adjusted", policy.id()).get("payload");
+        assertThat(payload)
+                .contains("\"adjustmentAmount\":\"50000.0000\"")
+                .contains("\"newTotalPremium\":\"170000.0000\"")
+                .contains("\"installmentNumber\":4");
+    }
+
+    @Test
+    void billsTheWholePolicyPremiumWhenThePlanIsFullyCredited() {
+        Policy policy = createPolicy("POL-ADJ-0013", new BigDecimal("120000.00"));
+        billingService.create(TENANT, policy.id(),
+                new CreateBillingPlanRequest(1, "ANNUAL", FIRST_DUE));
+        applyCredit(policy, 1, new BigDecimal("120000.00"));
+        raisePolicyPremium(policy.id(), new BigDecimal("150000.00"));
+
+        BillingAdjustmentView view = billingService.adjust(TENANT, policy.id(),
+                new BillingAdjustmentRequest(ADJUSTMENT_DUE, "credits cover the schedule"));
+
+        // The plan's net premium is zero, so the whole policy premium is billed
+        // on a gross plan total that now exceeds the written premium.
+        assertThat(view.adjustmentAmount()).isEqualByComparingTo("150000.0000");
+        assertThat(view.newTotalPremium()).isEqualByComparingTo("270000.0000");
+        assertThat(view.plan().totalPremium()).isEqualByComparingTo("270000.0000");
+        assertThat(view.plan().installmentCount()).isEqualTo(2);
+        assertThat(view.installment().installmentNumber()).isEqualTo(2);
+        assertThat(view.installment().amount()).isEqualByComparingTo("150000.0000");
+
+        assertThat((String) event("policy.billing-plan.adjusted", policy.id()).get("payload"))
+                .contains("\"adjustmentAmount\":\"150000.0000\"")
+                .contains("\"newTotalPremium\":\"270000.0000\"");
+    }
+
+    @Test
+    void rejectsANonPositiveRemainderAgainstTheCreditedPlan() {
+        Policy policy = createPolicy("POL-ADJ-0014", new BigDecimal("120000.00"));
+        billingService.create(TENANT, policy.id(),
+                new CreateBillingPlanRequest(3, "MONTHLY", FIRST_DUE));
+        applyCredit(policy, 1, new BigDecimal("20000.00"));
+
+        raisePolicyPremium(policy.id(), new BigDecimal("100000.00"));
+        assertThatThrownBy(() -> billingService.adjust(TENANT, policy.id(),
+                new BillingAdjustmentRequest(ADJUSTMENT_DUE, "net equal")))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException api = (ApiException) ex;
+                    assertThat(api.status()).isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(api.code()).isEqualTo("NO_PREMIUM_ADJUSTMENT");
+                    assertThat(api.meta())
+                            .containsEntry("delta", "0.0000")
+                            .containsEntry("policyPremiumAmount", "100000.0000")
+                            .containsEntry("planTotalPremium", "120000.0000")
+                            .containsEntry("creditedAmount", "20000.0000")
+                            .containsEntry("netPlanPremium", "100000.0000");
+                });
+
+        raisePolicyPremium(policy.id(), new BigDecimal("90000.00"));
+        assertThatThrownBy(() -> billingService.adjust(TENANT, policy.id(),
+                new BillingAdjustmentRequest(ADJUSTMENT_DUE, "net negative")))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException api = (ApiException) ex;
+                    assertThat(api.status()).isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(api.code()).isEqualTo("NO_PREMIUM_ADJUSTMENT");
+                    assertThat(api.meta()).containsEntry("delta", "-10000.0000");
+                });
+
+        assertThat(count("policy_installment")).isEqualTo(3);
+        assertThat(countEvents("policy.billing-plan.adjusted")).isZero();
     }
 
     @Test
@@ -360,6 +462,25 @@ class BillingAdjustmentServiceTest {
     private void raisePolicyPremium(UUID policyId, BigDecimal premium) {
         jdbc.update("UPDATE policy SET premium_amount = ? WHERE tenant_id = ? AND id = ?",
                 premium, TENANT, policyId);
+    }
+
+    /**
+     * Applies a real credit note to one installment, so the adjustment reads the
+     * credited totals the credit-note slice writes rather than a test-only row
+     * edit.
+     */
+    private void applyCredit(Policy policy, int installmentNumber, BigDecimal amount) {
+        UUID installmentId = billingService.get(TENANT, policy.id()).installments().stream()
+                .filter(row -> row.installmentNumber() == installmentNumber)
+                .findFirst()
+                .orElseThrow()
+                .id();
+        PolicyCreditNote note = creditNoteService.create(TENANT, policy.id(),
+                new CreateCreditNoteRequest(amount, "USD", "premium credit"));
+        creditNoteService.updateStatus(TENANT, policy.id(), note.id(),
+                new UpdateCreditNoteStatusRequest("ISSUED"));
+        creditNoteService.updateStatus(TENANT, policy.id(), note.id(),
+                new UpdateCreditNoteStatusRequest("APPLIED", installmentId));
     }
 
     private Map<String, Object> event(String eventType, UUID policyId) {

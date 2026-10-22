@@ -192,21 +192,31 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
 - Positive premium adjustment installments:
   `POST /api/v1/policies/{policyId}/billing/adjustment` (and the `/internal/v1`
   alias) accepts `{dueDate, reason}` and derives
-  `delta = policy.premiumAmount - plan.totalPremium`. It requires an ACTIVE plan
-  (`404 BILLING_PLAN_NOT_FOUND` when none, `409 BILLING_PLAN_NOT_ACTIVE` when the
-  plan is closed), rejects a non-positive delta with `400
-  NO_PREMIUM_ADJUSTMENT` (a decrease uses credit notes), validates the due date
-  against the policy effective date and the required 500-character-capped
-  reason, and enforces the 24-installment ceiling (`409
+  `delta = policy.premiumAmount - netPlanPremium`, where the plan's net premium
+  is its total less the sum of applied installment credits, floored at zero. It
+  requires an ACTIVE plan (`404 BILLING_PLAN_NOT_FOUND` when none, `409
+  BILLING_PLAN_NOT_ACTIVE` when the plan is closed), rejects a non-positive
+  delta with `400 NO_PREMIUM_ADJUSTMENT` (a decrease uses credit notes),
+  validates the due date against the policy effective date and the required
+  500-character-capped reason, and enforces the 24-installment ceiling (`409
   MAX_INSTALLMENTS_REACHED`).
 - An accepted adjustment appends one `DUE` installment with the next number and
-  the derived amount, moves `plan.totalPremium` to the policy premium and
-  `plan.installmentCount` up by one with a conditional plan UPDATE, bumps the
-  policy version, returns `201` with `{plan, installment, adjustmentAmount,
-  newTotalPremium}`, and writes `policy.billing-plan.adjusted` (`policyId`,
-  `policyNumber`, `planId`, `adjustmentAmount`, `newTotalPremium`,
-  `installmentId`, `installmentNumber`, `dueDate`, `reason`) in the same
-  transaction.
+  the derived amount, moves `plan.totalPremium` up by the delta (gross) and
+  `plan.installmentCount` up by one with a conditional plan UPDATE that also
+  checks the credited total the command read, bumps the policy version, returns
+  `201` with `{plan, installment, adjustmentAmount, newTotalPremium}`, and
+  writes `policy.billing-plan.adjusted` (`policyId`, `policyNumber`, `planId`,
+  `adjustmentAmount`, `newTotalPremium`, `installmentId`, `installmentNumber`,
+  `dueDate`, `reason`) in the same transaction.
+
+### Fixed
+
+- Positive premium adjustments compare the policy premium with the billing
+  plan's net premium instead of its gross total. The plan total is reduced by
+  the sum of `policy_installment.credited_amount` for the plan (floored at
+  zero), so a credited schedule no longer fails with
+  `NO_PREMIUM_ADJUSTMENT` when the real variance is positive; the appended
+  installment and the gross plan-total increase use that net-derived delta.
 
 ### Changed
 

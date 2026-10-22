@@ -11,10 +11,10 @@ import java.time.LocalDate;
  * billing plan.
  *
  * <p>The adjustment amount is derived, not supplied: it is the policy written
- * premium less the plan total premium, so only a positive remainder can be
- * billed. A zero or negative remainder is rejected with
- * {@code NO_PREMIUM_ADJUSTMENT}; a premium decrease is a credit-note concern,
- * not an installment.</p>
+ * premium less the plan's net premium (the plan total less applied credits,
+ * floored at zero), so only a positive remainder can be billed. A zero or
+ * negative remainder is rejected with {@code NO_PREMIUM_ADJUSTMENT}; a premium
+ * decrease is a credit-note concern, not an installment.</p>
  *
  * <p>{@code dueDate} is required and may not precede the policy effective date
  * (the effective date itself is accepted so an adjustment can be booked from
