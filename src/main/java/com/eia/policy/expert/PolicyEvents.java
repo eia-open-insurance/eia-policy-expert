@@ -40,6 +40,7 @@ final class PolicyEvents {
     static final String VERSION_ISSUED = "policy.policy.version-issued";
     static final String ENDORSED = "policy.policy.endorsed";
     static final String PREMIUM_AUDITED = "policy.policy.premium-audited";
+    static final String RATED = "policy.policy.rated";
     static final String CANCELLED = "policy.policy.cancelled";
     static final String REINSTATED = "policy.policy.reinstated";
     static final String RENEWED = "policy.policy.renewed";
@@ -521,6 +522,26 @@ final class PolicyEvents {
         data.put("effectiveDate", date(effectiveDate));
         data.put("reason", reason);
         return envelope(policy, PREMIUM_AUDITED, data, now);
+    }
+
+    /**
+     * Applying a rating worksheet replaces the policy premium. The payload is
+     * the rating contract: the policy identity, the written premium, the
+     * currency, the method, the canonical calculation hash, and the worksheet
+     * that evidences the calculation. A calculation-only request writes no
+     * event.
+     */
+    static EventEnvelope rated(Policy policy, PolicyRatingWorksheet worksheet, Instant now) {
+        Objects.requireNonNull(worksheet, "worksheet");
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("policyId", policy.id());
+        data.put("policyNumber", policy.policyNumber());
+        data.put("premiumAmount", money(worksheet.computedPremium()));
+        data.put("currency", worksheet.currency());
+        data.put("ratingMethod", worksheet.ratingMethod());
+        data.put("calcHash", worksheet.calcHash());
+        data.put("worksheetId", worksheet.id());
+        return envelope(policy, RATED, data, now);
     }
 
     static EventEnvelope cancelled(Policy policy, PolicyCancellation cancellation,

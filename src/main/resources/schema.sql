@@ -754,6 +754,47 @@ CREATE TABLE IF NOT EXISTS policy_mass_tort_profile (
 CREATE INDEX IF NOT EXISTS idx_policy_mass_tort_profile_tenant
     ON policy_mass_tort_profile (tenant_id, policy_id);
 
+-- Policy rating worksheets (SPEC 11.2.14 rating reproducibility / RATE-02).
+-- A worksheet is an append-only record of one rating calculation: the method,
+-- the rate, the exposure (null for FLAT), the factor, the rounded premium, and
+-- the canonical SHA-256 over the normalized inputs and result. Applying a
+-- worksheet replaces the policy premium and bumps the aggregate version; the
+-- worksheet itself stays CALCULATED as the reproducible evidence.
+CREATE TABLE IF NOT EXISTS policy_rating_worksheet (
+    id UUID PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    policy_id UUID NOT NULL REFERENCES policy (id) ON DELETE CASCADE,
+    rating_method VARCHAR(32) NOT NULL,
+    base_rate NUMERIC(19,6) NOT NULL,
+    exposure_amount NUMERIC(19,4),
+    factor NUMERIC(12,6) NOT NULL,
+    computed_premium NUMERIC(19,4) NOT NULL,
+    currency CHAR(3) NOT NULL,
+    calc_hash VARCHAR(64) NOT NULL,
+    status VARCHAR(16) NOT NULL DEFAULT 'CALCULATED',
+    created_at TIMESTAMPTZ NOT NULL,
+    created_by UUID NOT NULL,
+    CONSTRAINT ck_policy_rating_worksheet_method
+        CHECK (rating_method IN ('RATE_TIMES_EXPOSURE', 'FLAT')),
+    CONSTRAINT ck_policy_rating_worksheet_base_rate CHECK (base_rate >= 0),
+    CONSTRAINT ck_policy_rating_worksheet_factor CHECK (factor >= 0),
+    CONSTRAINT ck_policy_rating_worksheet_exposure CHECK (
+        (rating_method = 'RATE_TIMES_EXPOSURE'
+            AND exposure_amount IS NOT NULL AND exposure_amount > 0)
+        OR (rating_method = 'FLAT' AND exposure_amount IS NULL)
+    ),
+    CONSTRAINT ck_policy_rating_worksheet_premium CHECK (computed_premium >= 0),
+    CONSTRAINT ck_policy_rating_worksheet_currency
+        CHECK (CHAR_LENGTH(TRIM(currency)) = 3),
+    CONSTRAINT ck_policy_rating_worksheet_hash
+        CHECK (CHAR_LENGTH(calc_hash) = 64),
+    CONSTRAINT ck_policy_rating_worksheet_status CHECK (status = 'CALCULATED')
+);
+
+-- Newest-first lookup of a policy's rating history and its latest worksheet.
+CREATE INDEX IF NOT EXISTS idx_policy_rating_worksheet_policy
+    ON policy_rating_worksheet (tenant_id, policy_id, created_at DESC, id);
+
 -- Transactional outbox (SPEC 7.5.1). The canonical copy lives in
 -- eia-platform/libs/src/main/resources/db/outbox_event.sql; keep both in sync.
 CREATE TABLE IF NOT EXISTS outbox_event (

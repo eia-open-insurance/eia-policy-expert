@@ -19,7 +19,10 @@ credit note slice (DRAFT/ISSUED/APPLIED/CANCELLED/REVERSED billing adjustments
 with per-policy numbering, cancellation return-premium links, application to open
 installments, and credit reversal) from SPEC 11.2. A premium audit command
 replaces the policy premium, issues a `PREMIUM_AUDIT` endorsement and version,
-and writes `policy.policy.premium-audited` for a bound or in-force term.
+and writes `policy.policy.premium-audited` for a bound or in-force term. A rating
+worksheet command calculates and persists a reproducible premium for a DRAFT or
+QUOTED policy with `RATE_TIMES_EXPOSURE` or `FLAT`, and optionally applies it to
+the policy premium with `policy.policy.rated`.
 
 Policy writes also append canonical domain events to the platform transactional
 outbox (SPEC 7.5.1) in the same database transaction as the aggregate write.
@@ -36,6 +39,7 @@ outbox (SPEC 7.5.1) in the same database transaction as the aggregate write.
 | `CancellationController` / `CancellationService` / `CancellationRepository` | Cancellation, return premium, reinstatement |
 | `PolicyRenewalController` / `PolicyRenewalService` / `PolicyRenewalRules` | Renewal DRAFT creation, predecessor lineage, term inheritance |
 | `PremiumAuditController` / `PremiumAuditService` / `PremiumAuditRules` | Version-timeline-aware premium replacement, `PREMIUM_AUDIT` endorsement/version, and the audit outbox event |
+| `PolicyRatingController` / `PolicyRatingService` / `RatingWorksheetRepository` / `RatingRules` | DRAFT/QUOTED rating worksheets for `RATE_TIMES_EXPOSURE` and `FLAT`, the canonical SHA-256, optional premium application, and the rated outbox event |
 | `BillingController` / `BillingService` / `BillingRepository` | Billing plan, installment schedule, positive premium adjustment installments, PAID/WAIVED settlement, and the paid/waived/credited/outstanding plan summary |
 | `BillingDunningController` / `BillingDunningService` / `BillingDunningRepository` | Installment dunning actions, duplicate-level arbitration, and the dunning outbox event |
 | `BillingReceivablesController` / `ReceivableRow` / `InstallmentReceivable` | Tenant-wide open-premium receivables read model with derived overdue status, outstanding-after-credit amounts, and latest-SENT dunning enrichment |
@@ -43,7 +47,7 @@ outbox (SPEC 7.5.1) in the same database transaction as the aggregate write.
 | `MassTortProfileController` / `MassTortProfileService` / `MassTortProfileRepository` | One-profile-per-policy upsert, COMPLETE gating, and the profile outbox event |
 | `PolicyProgramController` / `PolicyProgramService` / `PolicyProgramRepository` | Commercial program catalog, optional capacity with the derived usage projection, policy assignment/clear, and the program outbox events |
 | `LegalEntityController` / `LegalEntityService` / `LegalEntityRepository` | Legal entity catalog, policy assignment/clear, and the legal entity outbox events |
-| `PolicyRules`, `VersionTimeline`, `CoverageRules`, `CancellationRules`, `CancellationMath`, `PartyRules`, `EndorsementRules`, `BillingRules`, `CreditNoteRules`, `MassTortProfileRules`, `ProgramRules`, `LegalEntityRules` | Pure invariants with focused unit tests |
+| `PolicyRules`, `VersionTimeline`, `CoverageRules`, `CancellationRules`, `CancellationMath`, `PartyRules`, `EndorsementRules`, `BillingRules`, `CreditNoteRules`, `MassTortProfileRules`, `ProgramRules`, `LegalEntityRules`, `RatingRules` | Pure invariants with focused unit tests |
 | `PolicyVersionHasher`, `VersionIssuer` | Canonical version snapshot hash and issuance |
 | `CommandIdempotency` | Per-command replay/conflict behaviour |
 | `PolicyEvents`, `PolicyOutboxSchedulingConfiguration` | Canonical event envelopes and the Quartz outbox dispatch job |
@@ -76,6 +80,7 @@ aggregate change and the event row:
 | `POST /api/v1/billing/installments/{installmentId}/dunning` (also `/internal/v1` alias) | `policy.dunning.sent`; each accepted action advances the policy version |
 | `POST /api/v1/policies/{id}/credit-notes` (also `/internal/v1` alias) | `policy.credit-note.created`; a linked return-premium note adds `cancellationId`/`cancellationNumber`, and the note is created `DRAFT` |
 | `PATCH /api/v1/policies/{id}/credit-notes/{creditNoteId}/status` (also `/internal/v1` alias) | `policy.credit-note.issued`, `policy.credit-note.applied`, `policy.credit-note.cancelled`, or `policy.credit-note.reversed`; an APPLIED transition credits the named open installment (or `409`s), a REVERSED transition requires a reason, releases the credit from the recorded installment, and reopens a CREDITED row as DUE/OVERDUE; terminal/out-of-order transitions are `409`, and each accepted transition advances the policy version |
+| `POST /api/v1/policies/{id}/rating` (also `/internal/v1` alias) | `policy.policy.rated` when `apply` is true; the worksheet, premium replacement, and policy version bump commit together, while a calculation-only request writes no event |
 | `PUT /api/v1/policies/{id}/mass-tort-profile` (also `/internal/v1` alias) | `policy.mass-tort-profile.updated`; every accepted upsert writes one event |
 | `POST /api/v1/programs` (also `/internal/v1` alias) | `policy.program.created` against the `Program` aggregate |
 | `PATCH /api/v1/policies/{id}/program` (also `/internal/v1` alias) | `policy.policy.program-assigned`; `programId` is null when the link is cleared, and every accepted command advances the policy version |
@@ -286,6 +291,43 @@ installment, adjustmentAmount, newTotalPremium}`. The policy version bump and
 `adjustmentAmount`, `newTotalPremium`, `installmentId`, `installmentNumber`,
 `dueDate`, `reason`) commit in the same transaction.
 
+## Policy rating worksheets
+
+`POST /api/v1/policies/{id}/rating` (also the `/internal/v1` alias) accepts
+`{ratingMethod, baseRate, exposureAmount, factor, apply}` and always persists
+one immutable `policy_rating_worksheet` row. Only `DRAFT` and `QUOTED` policies
+are rateable; any other lifecycle state is `409 POLICY_NOT_RATEABLE` with
+`policyId`, `sourceStatus`, and the allowed statuses in `meta`. The methods are
+`RATE_TIMES_EXPOSURE` (`baseRate * exposureAmount * factor`) and `FLAT`
+(`baseRate * factor`). The factor defaults to `1`; `baseRate` and `factor` must
+be non-negative; `RATE_TIMES_EXPOSURE` requires a strictly positive
+`exposureAmount` and stores it, while `FLAT` ignores the exposure and stores
+null. The computed premium is rounded once to scale 4 with HALF_UP.
+
+`calcHash` is the SHA-256 of a canonical line-based rendering of the normalized
+method, base rate (scale 6), exposure (scale 4 or `~`), factor (scale 6),
+computed premium (scale 4), and currency. Normalizing before hashing makes the
+digest independent of the request's decimal scale, so `100` and `100.000000`
+reproduce the same hash. The worksheet response is the stored row: identity and
+tenant, the normalized inputs, `computedPremium`, `currency`, `calcHash`,
+`status=CALCULATED`, `createdAt`, and `createdBy` (the system actor
+`00000000-0000-0000-0000-000000000000`, because the internal command carries no
+user identity).
+
+A calculation-only command (`apply=false`, the default) returns
+`201 {worksheet}` and leaves the policy untouched. `apply=true` replaces the
+policy premium with the computed premium, bumps the aggregate version, and
+writes `policy.policy.rated` in the same transaction with `{policyId,
+policyNumber, premiumAmount, currency, ratingMethod, calcHash, worksheetId}`.
+The response is `201 {worksheet, policy}` with the new policy ETag. The
+conditional premium update uses the version read by the command, so a stale
+`If-Match` or a concurrent change is `409 CONCURRENT_MODIFICATION` and rolls the
+worksheet back. `GET /api/v1/policies/{id}/rating` (also `/internal/v1`)
+returns the newest worksheet by `created_at`, or `404
+RATING_WORKSHEET_NOT_FOUND` when the policy has never been rated. Every read and
+write is tenant scoped, and a policy from another tenant is a `404
+POLICY_NOT_FOUND`.
+
 ## Verification
 
 ```powershell
@@ -354,3 +396,10 @@ The live smoke is opt-in and requires PostgreSQL.
   reported exposure, deposit/rated/additional/return premium, and
   SCHEDULED/IN_REVIEW/FINALIZED statuses) and the quarterly
   `policy.premium-audit-batch` are not implemented.
+- Policy rating is a single premium calculation and worksheet per command. The
+  SPEC 11.2.14 `rating_plan`, `rating_factor`, exposure lines, factor trace,
+  minimum premium, tax/fee amounts, and APPROVED/SUPERSEDED worksheet workflow
+  are not modelled; a worksheet has no plan reference and is always
+  `CALCULATED`. Rating is not required before quote or bind, and the rating
+  command has no `Idempotency-Key` replay (each accepted command appends a
+  worksheet).

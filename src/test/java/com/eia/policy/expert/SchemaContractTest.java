@@ -272,6 +272,30 @@ class SchemaContractTest {
     }
 
     @Test
+    void schemaDefinesTheRatingWorksheetWithItsPolicyIndex() throws Exception {
+        String schema = schema();
+
+        assertThat(schema).contains("CREATE TABLE IF NOT EXISTS policy_rating_worksheet");
+        assertThat(schema).contains("rating_method VARCHAR(32) NOT NULL");
+        assertThat(schema).contains("base_rate NUMERIC(19,6) NOT NULL");
+        assertThat(schema).contains("exposure_amount NUMERIC(19,4)");
+        assertThat(schema).contains("factor NUMERIC(12,6) NOT NULL");
+        assertThat(schema).contains("computed_premium NUMERIC(19,4) NOT NULL");
+        assertThat(schema).contains("currency CHAR(3) NOT NULL");
+        assertThat(schema).contains("calc_hash VARCHAR(64) NOT NULL");
+        assertThat(schema).contains("created_by UUID NOT NULL");
+        assertThat(schema).contains(
+                "CHECK (rating_method IN ('RATE_TIMES_EXPOSURE', 'FLAT'))");
+        assertThat(schema).contains("CONSTRAINT ck_policy_rating_worksheet_status "
+                + "CHECK (status = 'CALCULATED')");
+        assertThat(schema).contains("CONSTRAINT ck_policy_rating_worksheet_exposure");
+        assertThat(schema).contains(
+                "CREATE INDEX IF NOT EXISTS idx_policy_rating_worksheet_policy");
+        assertThat(schema).contains(
+                "ON policy_rating_worksheet (tenant_id, policy_id, created_at DESC, id)");
+    }
+
+    @Test
     void schemaMatchesThePlatformTransactionalOutbox() throws Exception {
         String schema = schema();
 

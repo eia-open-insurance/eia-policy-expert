@@ -663,6 +663,42 @@ CREATE TABLE IF NOT EXISTS policy_mass_tort_profile (
 CREATE INDEX IF NOT EXISTS idx_policy_mass_tort_profile_tenant
     ON policy_mass_tort_profile (tenant_id, policy_id);
 
+-- H2-compatible copy of the policy rating worksheet table. The CHECK
+-- constraints mirror the PostgreSQL DDL; the FK cascades with the policy.
+CREATE TABLE IF NOT EXISTS policy_rating_worksheet (
+    id UUID PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    policy_id UUID NOT NULL REFERENCES policy (id) ON DELETE CASCADE,
+    rating_method VARCHAR(32) NOT NULL,
+    base_rate NUMERIC(19,6) NOT NULL,
+    exposure_amount NUMERIC(19,4),
+    factor NUMERIC(12,6) NOT NULL,
+    computed_premium NUMERIC(19,4) NOT NULL,
+    currency CHAR(3) NOT NULL,
+    calc_hash VARCHAR(64) NOT NULL,
+    status VARCHAR(16) NOT NULL DEFAULT 'CALCULATED',
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    created_by UUID NOT NULL,
+    CONSTRAINT ck_policy_rating_worksheet_method
+        CHECK (rating_method IN ('RATE_TIMES_EXPOSURE', 'FLAT')),
+    CONSTRAINT ck_policy_rating_worksheet_base_rate CHECK (base_rate >= 0),
+    CONSTRAINT ck_policy_rating_worksheet_factor CHECK (factor >= 0),
+    CONSTRAINT ck_policy_rating_worksheet_exposure CHECK (
+        (rating_method = 'RATE_TIMES_EXPOSURE'
+            AND exposure_amount IS NOT NULL AND exposure_amount > 0)
+        OR (rating_method = 'FLAT' AND exposure_amount IS NULL)
+    ),
+    CONSTRAINT ck_policy_rating_worksheet_premium CHECK (computed_premium >= 0),
+    CONSTRAINT ck_policy_rating_worksheet_currency
+        CHECK (CHAR_LENGTH(TRIM(currency)) = 3),
+    CONSTRAINT ck_policy_rating_worksheet_hash
+        CHECK (CHAR_LENGTH(calc_hash) = 64),
+    CONSTRAINT ck_policy_rating_worksheet_status CHECK (status = 'CALCULATED')
+);
+
+CREATE INDEX IF NOT EXISTS idx_policy_rating_worksheet_policy
+    ON policy_rating_worksheet (tenant_id, policy_id, created_at DESC, id);
+
 -- H2-compatible copy of the PostgreSQL outbox table. JSON payloads are TEXT
 -- here; production DDL uses jsonb.
 CREATE TABLE IF NOT EXISTS outbox_event (
