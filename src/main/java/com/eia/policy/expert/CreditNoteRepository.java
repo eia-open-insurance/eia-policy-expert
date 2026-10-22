@@ -16,19 +16,23 @@ import java.util.UUID;
  * missing one.
  *
  * <p>The status update is conditional on the expected current status; the
- * caller treats zero affected rows as a concurrent transition.</p>
+ * caller treats zero affected rows as a concurrent transition. Reversal is a
+ * separate conditional transition that preserves the application audit columns
+ * and writes the reversal stamp and reason.</p>
  */
 @Repository
 public class CreditNoteRepository {
     private static final String SELECT_COLUMNS = """
             SELECT id, tenant_id, policy_id, note_number, amount, currency, reason, status,
-                   issued_at, applied_at, applied_installment_id, created_at
+                   issued_at, applied_at, applied_installment_id, created_at, reversed_at,
+                   reversal_reason
               FROM policy_credit_note
             """;
 
     private static final RowMapper<PolicyCreditNote> MAPPER = (rs, rowNum) -> {
         Timestamp issuedAt = rs.getTimestamp("issued_at");
         Timestamp appliedAt = rs.getTimestamp("applied_at");
+        Timestamp reversedAt = rs.getTimestamp("reversed_at");
         return new PolicyCreditNote(
                 rs.getObject("id", UUID.class),
                 rs.getObject("tenant_id", UUID.class),
@@ -41,7 +45,9 @@ public class CreditNoteRepository {
                 issuedAt == null ? null : issuedAt.toInstant(),
                 appliedAt == null ? null : appliedAt.toInstant(),
                 rs.getObject("applied_installment_id", UUID.class),
-                rs.getTimestamp("created_at").toInstant()
+                rs.getTimestamp("created_at").toInstant(),
+                reversedAt == null ? null : reversedAt.toInstant(),
+                rs.getString("reversal_reason")
         );
     };
 
@@ -72,15 +78,18 @@ public class CreditNoteRepository {
         jdbc.update("""
                 INSERT INTO policy_credit_note
                        (id, tenant_id, policy_id, note_number, amount, currency, reason, status,
-                        issued_at, applied_at, applied_installment_id, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        issued_at, applied_at, applied_installment_id, created_at, reversed_at,
+                        reversal_reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, creditNote.id(), creditNote.tenantId(), creditNote.policyId(),
                 creditNote.noteNumber(), creditNote.amount(), creditNote.currency(),
                 creditNote.reason(), creditNote.status(),
                 creditNote.issuedAt() == null ? null : Timestamp.from(creditNote.issuedAt()),
                 creditNote.appliedAt() == null ? null : Timestamp.from(creditNote.appliedAt()),
                 creditNote.appliedInstallmentId(),
-                Timestamp.from(creditNote.createdAt()));
+                Timestamp.from(creditNote.createdAt()),
+                creditNote.reversedAt() == null ? null : Timestamp.from(creditNote.reversedAt()),
+                creditNote.reversalReason());
     }
 
     /**
@@ -100,6 +109,23 @@ public class CreditNoteRepository {
                 issuedAt == null ? null : Timestamp.from(issuedAt),
                 appliedAt == null ? null : Timestamp.from(appliedAt),
                 appliedInstallmentId,
+                tenantId, policyId, creditNoteId, expectedStatus);
+    }
+
+    /**
+     * Conditional reversal transition: only an APPLIED row is reversed. The
+     * issued/applied stamps and the applied installment id are deliberately left
+     * untouched so the original application remains auditable; the reversal
+     * stamp and reason are written beside them. A concurrent winner returns
+     * zero and the caller reports the state conflict.
+     */
+    public int reverse(UUID tenantId, UUID policyId, UUID creditNoteId, Instant reversedAt,
+                       String reversalReason, String expectedStatus) {
+        return jdbc.update("""
+                UPDATE policy_credit_note
+                   SET status = 'REVERSED', reversed_at = ?, reversal_reason = ?
+                 WHERE tenant_id = ? AND policy_id = ? AND id = ? AND status = ?
+                """, Timestamp.from(reversedAt), reversalReason,
                 tenantId, policyId, creditNoteId, expectedStatus);
     }
 

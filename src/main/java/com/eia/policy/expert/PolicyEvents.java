@@ -49,6 +49,7 @@ final class PolicyEvents {
     static final String CREDIT_NOTE_ISSUED = "policy.credit-note.issued";
     static final String CREDIT_NOTE_APPLIED = "policy.credit-note.applied";
     static final String CREDIT_NOTE_CANCELLED = "policy.credit-note.cancelled";
+    static final String CREDIT_NOTE_REVERSED = "policy.credit-note.reversed";
     static final String MASS_TORT_PROFILE_UPDATED = "policy.mass-tort-profile.updated";
     static final String PROGRAM_CREATED = "policy.program.created";
     static final String PROGRAM_ASSIGNED = "policy.policy.program-assigned";
@@ -102,11 +103,18 @@ final class PolicyEvents {
      * <p>An APPLIED event also carries {@code installmentId} and the
      * installment's cumulative {@code creditedAmount} after the application, so
      * a receivables consumer can update the open installment without a second
-     * read. ISSUED and CANCELLED events never name an installment.</p>
+     * read. ISSUED, CANCELLED, and REVERSED events never carry
+     * {@code creditedAmount}; a reversed note is emitted by
+     * {@link #creditNoteReversed(Policy, PolicyCreditNote, UUID, Instant)} so
+     * its payload matches the reversal contract.</p>
      */
     static EventEnvelope creditNoteStatusChanged(Policy policy, PolicyCreditNote creditNote,
                                                  PolicyInstallment installment, Instant now) {
         Objects.requireNonNull(creditNote, "creditNote");
+        if (CreditNoteRules.REVERSED.equals(creditNote.status())) {
+            return creditNoteReversed(policy, creditNote,
+                    installment == null ? null : installment.id(), now);
+        }
         String eventType = switch (creditNote.status()) {
             case CreditNoteRules.ISSUED -> CREDIT_NOTE_ISSUED;
             case CreditNoteRules.APPLIED -> CREDIT_NOTE_APPLIED;
@@ -135,6 +143,27 @@ final class PolicyEvents {
     static EventEnvelope creditNoteStatusChanged(Policy policy, PolicyCreditNote creditNote,
                                                  Instant now) {
         return creditNoteStatusChanged(policy, creditNote, null, now);
+    }
+
+    /**
+     * A reversal releases the note's credit and explains why. The payload is the
+     * reversal contract: the note identifiers, the installment that received the
+     * credit (explicitly null for a legacy APPLIED note that predates
+     * installment application), the note amount, the reversal reason, and the
+     * new REVERSED status.
+     */
+    static EventEnvelope creditNoteReversed(Policy policy, PolicyCreditNote creditNote,
+                                            UUID installmentId, Instant now) {
+        Objects.requireNonNull(creditNote, "creditNote");
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("creditNoteId", creditNote.id());
+        data.put("noteNumber", creditNote.noteNumber());
+        data.put("installmentId",
+                installmentId == null ? NullNode.getInstance() : installmentId);
+        data.put("amount", money(creditNote.amount()));
+        data.put("reason", creditNote.reversalReason());
+        data.put("status", creditNote.status());
+        return envelope(policy, CREDIT_NOTE_REVERSED, data, now);
     }
 
     /**

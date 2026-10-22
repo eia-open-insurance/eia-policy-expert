@@ -257,6 +257,26 @@ public class BillingRepository {
     }
 
     /**
+     * Reverses one credit note amount on an installment. The credited total is
+     * expected to still be the value the caller read (the conditional WHERE is
+     * the concurrency arbiter), so a concurrent credit or settlement makes this
+     * return zero and the caller rolls the note reversal back. The new credited
+     * amount is clamped at zero by the caller; the status is restored to
+     * DUE/OVERDUE when a fully CREDITED row no longer covers its gross amount.
+     */
+    public int releaseCredit(UUID tenantId, UUID planId, UUID installmentId,
+                             BigDecimal creditedAmount, String status,
+                             BigDecimal expectedCreditedAmount, String expectedStatus) {
+        return jdbc.update("""
+                UPDATE policy_installment
+                   SET credited_amount = ?, status = ?
+                 WHERE tenant_id = ? AND plan_id = ? AND id = ?
+                   AND credited_amount = ? AND status = ?
+                """, creditedAmount, status, tenantId, planId, installmentId,
+                expectedCreditedAmount, expectedStatus);
+    }
+
+    /**
      * Conditional transition: only a DUE/OVERDUE row still at the expected
      * status is settled. A concurrent winner makes this return zero.
      */

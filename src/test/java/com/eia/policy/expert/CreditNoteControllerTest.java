@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.UUID;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -31,6 +32,7 @@ class CreditNoteControllerTest {
     private static final UUID INSTALLMENT_ID =
             UUID.fromString("55555555-5555-7555-8555-555555555555");
     private static final Instant CREATED = Instant.parse("2026-01-15T10:00:00Z");
+    private static final Instant REVERSED_AT = Instant.parse("2026-02-01T09:30:00Z");
 
     @Autowired
     private MockMvc mvc;
@@ -149,6 +151,42 @@ class CreditNoteControllerTest {
     }
 
     @Test
+    void reversesAnAppliedCreditNoteWithAReason() throws Exception {
+        when(service.updateStatus(eq(TENANT), eq(POLICY_ID), eq(NOTE_ID),
+                argThat(request -> "REVERSED".equals(request.status())
+                        && "billing correction".equals(request.reason()))))
+                .thenReturn(reversedNote());
+
+        mvc.perform(patch("/api/v1/policies/{policyId}/credit-notes/{creditNoteId}/status",
+                        POLICY_ID, NOTE_ID)
+                        .param("tenantId", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"status":"REVERSED","reason":"billing correction"}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("REVERSED"))
+                .andExpect(jsonPath("$.reversedAt").value(REVERSED_AT.toString()))
+                .andExpect(jsonPath("$.reversalReason").value("billing correction"))
+                .andExpect(jsonPath("$.appliedInstallmentId")
+                        .value(INSTALLMENT_ID.toString()));
+    }
+
+    @Test
+    void rejectsAReversalReasonLongerThanFiveHundredCharacters() throws Exception {
+        mvc.perform(patch("/api/v1/policies/{policyId}/credit-notes/{creditNoteId}/status",
+                        POLICY_ID, NOTE_ID)
+                        .param("tenantId", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(
+                                new UpdateCreditNoteStatusRequest("REVERSED", null,
+                                        "x".repeat(501)))))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.errors[0].field").value("reason"));
+    }
+
+    @Test
     void validatesTheStatusBody() throws Exception {
         mvc.perform(patch("/api/v1/policies/{policyId}/credit-notes/{creditNoteId}/status",
                         POLICY_ID, NOTE_ID)
@@ -226,5 +264,11 @@ class CreditNoteControllerTest {
         return new PolicyCreditNote(NOTE_ID, TENANT, POLICY_ID, "CN-0000001",
                 new BigDecimal("1500.5000"), "USD", "adjustment", status, issuedAt, appliedAt,
                 appliedInstallmentId, CREATED);
+    }
+
+    private static PolicyCreditNote reversedNote() {
+        return new PolicyCreditNote(NOTE_ID, TENANT, POLICY_ID, "CN-0000001",
+                new BigDecimal("1500.5000"), "USD", "adjustment", "REVERSED", CREATED, CREATED,
+                INSTALLMENT_ID, CREATED, REVERSED_AT, "billing correction");
     }
 }

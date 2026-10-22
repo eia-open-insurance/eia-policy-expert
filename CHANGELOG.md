@@ -141,6 +141,18 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   credited, outstanding, and overdue money. The receivables read keeps `amount`
   gross, adds the same two credit fields, excludes `CREDITED` rows, and sums
   `outstandingAmount` into `totalAmount`/`overdueAmount`.
+- Credit note reversal: the `REVERSED` status plus idempotent
+  `reversed_at`/`reversal_reason` columns and an updated status check on
+  `policy_credit_note`. `PATCH .../status` accepts `REVERSED` only from
+  `APPLIED`, requires a reason of at most 500 characters, retains
+  `applied_installment_id` for audit, releases the note amount from the credited
+  installment (clamped at zero), reopens a `CREDITED` row as `DUE`/`OVERDUE`
+  depending on its due date, and leaves a legacy APPLIED note without an
+  installment as a status/reason-only reversal.
+- `policy.credit-note.reversed` outbox event (`creditNoteId`, `noteNumber`,
+  `installmentId`, `amount`, `reason`, `status`) written in the same transaction
+  as the reversal and policy version bump; billing summaries and receivables
+  reflect the restored credit.
 
 ### Changed
 

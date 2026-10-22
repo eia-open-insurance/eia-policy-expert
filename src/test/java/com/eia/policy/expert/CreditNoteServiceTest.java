@@ -15,6 +15,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
+import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.List;
@@ -543,9 +544,329 @@ class CreditNoteServiceTest {
         assertThat(policyService.get(TENANT, policy.id()).version()).isEqualTo(versionBefore);
     }
 
+    @Test
+    void reversingAFullCreditRestoresTheInstallmentAndTheSummary() {
+        Policy policy = createPolicy("POL-CN-0023", new BigDecimal("120000.00"));
+        PolicyInstallment installment = createPlan(policy, today().plusDays(10))
+                .installments().getFirst();
+        PolicyCreditNote note = createNote(policy, "40000.00");
+        PolicyCreditNote issued = issue(policy, note);
+        PolicyCreditNote applied = apply(policy, note, installment.id());
+        assertThat(applied.status()).isEqualTo("APPLIED");
+
+        BillingPlanSummary before = billingService.get(TENANT, policy.id()).summary();
+        assertThat(before.creditedAmount()).isEqualByComparingTo("40000.0000");
+        assertThat(before.outstandingAmount()).isEqualByComparingTo("80000.0000");
+        assertThat(billingService.listReceivables(TENANT, null, null, 100).items())
+                .extracting(InstallmentReceivable::installmentId)
+                .doesNotContain(installment.id());
+
+        PolicyCreditNote reversed = creditNoteService.updateStatus(TENANT, policy.id(), note.id(),
+                new UpdateCreditNoteStatusRequest("REVERSED", null, "  customer dispute  "));
+
+        assertThat(reversed.status()).isEqualTo("REVERSED");
+        assertThat(reversed.appliedInstallmentId()).isEqualTo(installment.id());
+        assertThat(reversed.issuedAt()).isEqualTo(issued.issuedAt());
+        assertThat(reversed.appliedAt()).isEqualTo(applied.appliedAt());
+        assertThat(reversed.reversedAt()).isNotNull();
+        assertThat(reversed.reversalReason()).isEqualTo("customer dispute");
+
+        PolicyInstallment restored = billingService.get(TENANT, policy.id()).installments()
+                .getFirst();
+        assertThat(restored.status()).isEqualTo("DUE");
+        assertThat(restored.creditedAmount()).isEqualByComparingTo("0.0000");
+        assertThat(restored.outstandingAmount()).isEqualByComparingTo("40000.0000");
+
+        BillingPlanSummary after = billingService.get(TENANT, policy.id()).summary();
+        assertThat(after.creditedAmount()).isEqualByComparingTo("0.0000");
+        assertThat(after.outstandingAmount()).isEqualByComparingTo("120000.0000");
+        assertThat(after.overdueAmount()).isEqualByComparingTo("0.0000");
+
+        ReceivablesView receivables = billingService.listReceivables(TENANT, null, null, 100);
+        assertThat(receivables.items()).extracting(InstallmentReceivable::installmentId)
+                .contains(installment.id());
+        assertThat(receivables.totalAmount()).isEqualByComparingTo("120000.0000");
+    }
+
+    @Test
+    void reversingAFullCreditOnAPastDueInstallmentRestoresOverdue() {
+        Policy policy = createPolicy("POL-CN-0024", new BigDecimal("120000.00"));
+        PolicyInstallment installment = createPlan(policy, today().minusDays(5))
+                .installments().getFirst();
+        PolicyCreditNote note = createNote(policy, "40000.00");
+        issue(policy, note);
+        apply(policy, note, installment.id());
+        assertThat(storedInstallmentStatus(installment.id())).isEqualTo("CREDITED");
+
+        reverse(policy, note, "billing correction");
+
+        PolicyInstallment restored = billingService.get(TENANT, policy.id()).installments()
+                .getFirst();
+        assertThat(restored.status()).isEqualTo("OVERDUE");
+        assertThat(restored.creditedAmount()).isEqualByComparingTo("0.0000");
+        assertThat(restored.outstandingAmount()).isEqualByComparingTo("40000.0000");
+
+        ReceivablesView overdue = billingService.listReceivables(TENANT, "OVERDUE", null, 100);
+        assertThat(overdue.items()).extracting(InstallmentReceivable::installmentId)
+                .containsExactly(installment.id());
+        InstallmentReceivable item = overdue.items().getFirst();
+        assertThat(item.status()).isEqualTo("OVERDUE");
+        assertThat(item.daysPastDue()).isEqualTo(5L);
+        assertThat(item.outstandingAmount()).isEqualByComparingTo("40000.0000");
+        assertThat(overdue.totalAmount()).isEqualByComparingTo("40000.0000");
+        assertThat(overdue.overdueAmount()).isEqualByComparingTo("40000.0000");
+    }
+
+    @Test
+    void reversingAPartialCreditShrinksTheCreditedAmountAndKeepsTheOpenStatus() {
+        Policy policy = createPolicy("POL-CN-0025", new BigDecimal("120000.00"));
+        PolicyInstallment installment = createPlan(policy, today().plusDays(10))
+                .installments().getFirst();
+        PolicyCreditNote first = createNote(policy, "10000.00");
+        PolicyCreditNote second = createNote(policy, "5000.00");
+        issue(policy, first);
+        issue(policy, second);
+        apply(policy, first, installment.id());
+        apply(policy, second, installment.id());
+
+        reverse(policy, second, "over-credited");
+
+        PolicyInstallment restored = billingService.get(TENANT, policy.id()).installments()
+                .getFirst();
+        assertThat(restored.status()).isEqualTo("DUE");
+        assertThat(restored.creditedAmount()).isEqualByComparingTo("10000.0000");
+        assertThat(restored.outstandingAmount()).isEqualByComparingTo("30000.0000");
+
+        assertThat(noteById(policy, second.id()).status()).isEqualTo("REVERSED");
+        assertThat(noteById(policy, second.id()).appliedInstallmentId())
+                .isEqualTo(installment.id());
+        assertThat(noteById(policy, first.id()).status()).isEqualTo("APPLIED");
+
+        BillingPlanSummary summary = billingService.get(TENANT, policy.id()).summary();
+        assertThat(summary.creditedAmount()).isEqualByComparingTo("10000.0000");
+        assertThat(summary.outstandingAmount()).isEqualByComparingTo("110000.0000");
+    }
+
+    @Test
+    void reversingTheNoteThatSettledACreditedInstallmentReopensIt() {
+        Policy policy = createPolicy("POL-CN-0026", new BigDecimal("120000.00"));
+        PolicyInstallment installment = createPlan(policy, today().plusDays(10))
+                .installments().getFirst();
+        PolicyCreditNote first = createNote(policy, "30000.00");
+        PolicyCreditNote second = createNote(policy, "10000.00");
+        issue(policy, first);
+        issue(policy, second);
+        apply(policy, first, installment.id());
+        apply(policy, second, installment.id());
+        assertThat(storedInstallmentStatus(installment.id())).isEqualTo("CREDITED");
+
+        reverse(policy, second, "duplicate billing");
+
+        PolicyInstallment restored = billingService.get(TENANT, policy.id()).installments()
+                .getFirst();
+        assertThat(restored.status()).isEqualTo("DUE");
+        assertThat(restored.creditedAmount()).isEqualByComparingTo("30000.0000");
+        assertThat(restored.outstandingAmount()).isEqualByComparingTo("10000.0000");
+        assertThat(billingService.get(TENANT, policy.id()).summary().creditedAmount())
+                .isEqualByComparingTo("30000.0000");
+        assertThat(billingService.get(TENANT, policy.id()).summary().outstandingAmount())
+                .isEqualByComparingTo("90000.0000");
+    }
+
+    @Test
+    void reversingALegacyAppliedNoteWithoutAnInstallmentOnlyMarksTheNote() {
+        Policy policy = createPolicy("POL-CN-0027", new BigDecimal("120000.00"));
+        PolicyCreditNote note = createNote(policy, "250.00");
+        issue(policy, note);
+        // A historical APPLIED note predates installment application, so it has
+        // no applied_installment_id even though it is APPLIED.
+        jdbc.update("""
+                UPDATE policy_credit_note
+                   SET status = 'APPLIED', applied_at = CURRENT_TIMESTAMP
+                 WHERE tenant_id = ? AND id = ?
+                """, TENANT, note.id());
+
+        PolicyCreditNote reversed = reverse(policy, note, "legacy cleanup");
+
+        assertThat(reversed.status()).isEqualTo("REVERSED");
+        assertThat(reversed.appliedInstallmentId()).isNull();
+        assertThat(reversed.appliedAt()).isNotNull();
+        assertThat(reversed.reversedAt()).isNotNull();
+        assertThat(reversed.reversalReason()).isEqualTo("legacy cleanup");
+
+        String payload =
+                (String) event("policy.credit-note.reversed", policy.id()).get("payload");
+        assertThat(payload)
+                .contains("\"creditNoteId\":\"" + note.id() + "\"")
+                .contains("\"noteNumber\":\"" + note.noteNumber() + "\"")
+                .contains("\"installmentId\":null")
+                .contains("\"amount\":\"250.0000\"")
+                .contains("\"reason\":\"legacy cleanup\"")
+                .contains("\"status\":\"REVERSED\"");
+    }
+
+    @Test
+    void rejectsReversalOfANoteThatIsNotApplied() {
+        Policy policy = createPolicy("POL-CN-0028", new BigDecimal("120000.00"));
+        PolicyInstallment installment = createPlan(policy, today().plusDays(10))
+                .installments().getFirst();
+        PolicyCreditNote note = createNote(policy, "250.00");
+
+        assertConflict(() -> reverse(policy, note, "not applied"),
+                "INVALID_CREDIT_NOTE_TRANSITION");
+        issue(policy, note);
+        assertConflict(() -> reverse(policy, note, "not applied"),
+                "INVALID_CREDIT_NOTE_TRANSITION");
+
+        apply(policy, note, installment.id());
+        reverse(policy, note, "first reversal");
+        assertConflict(() -> reverse(policy, note, "second reversal"),
+                "INVALID_CREDIT_NOTE_TRANSITION");
+
+        PolicyCreditNote cancelled = createNote(policy, "100.00");
+        creditNoteService.updateStatus(TENANT, policy.id(), cancelled.id(),
+                new UpdateCreditNoteStatusRequest("CANCELLED"));
+        assertConflict(() -> reverse(policy, cancelled, "cancelled note"),
+                "INVALID_CREDIT_NOTE_TRANSITION");
+
+        assertThat(noteById(policy, note.id()).status()).isEqualTo("REVERSED");
+        assertThat(countEvents("policy.credit-note.reversed")).isEqualTo(1);
+    }
+
+    @Test
+    void requiresAReversalReasonWithinTheLimit() {
+        Policy policy = createPolicy("POL-CN-0029", new BigDecimal("120000.00"));
+        PolicyInstallment installment = createPlan(policy, today().plusDays(10))
+                .installments().getFirst();
+        PolicyCreditNote note = createNote(policy, "250.00");
+        issue(policy, note);
+        apply(policy, note, installment.id());
+
+        assertBadRequest(() -> creditNoteService.updateStatus(TENANT, policy.id(), note.id(),
+                new UpdateCreditNoteStatusRequest("REVERSED", null, null)),
+                "INVALID_CREDIT_NOTE_REASON");
+        assertBadRequest(() -> reverse(policy, note, "   "), "INVALID_CREDIT_NOTE_REASON");
+        assertBadRequest(() -> reverse(policy, note, "x".repeat(501)),
+                "INVALID_CREDIT_NOTE_REASON");
+
+        assertThat(noteById(policy, note.id()).status()).isEqualTo("APPLIED");
+        assertThat(countEvents("policy.credit-note.reversed")).isZero();
+        PolicyInstallment unchanged = billingService.get(TENANT, policy.id()).installments()
+                .getFirst();
+        assertThat(unchanged.creditedAmount()).isEqualByComparingTo("250.0000");
+
+        PolicyCreditNote reversed = reverse(policy, note, "x".repeat(500));
+        assertThat(reversed.reversalReason()).hasSize(500);
+    }
+
+    @Test
+    void reversalNeverDrivesTheCreditedAmountBelowZero() {
+        Policy policy = createPolicy("POL-CN-0030", new BigDecimal("120000.00"));
+        PolicyInstallment installment = createPlan(policy, today().plusDays(10))
+                .installments().getFirst();
+        PolicyCreditNote note = createNote(policy, "40000.00");
+        issue(policy, note);
+        apply(policy, note, installment.id());
+        jdbc.update("UPDATE policy_installment SET credited_amount = 1000.0000 WHERE id = ?",
+                installment.id());
+
+        reverse(policy, note, "mismatched ledger");
+
+        PolicyInstallment restored = billingService.get(TENANT, policy.id()).installments()
+                .getFirst();
+        assertThat(restored.creditedAmount()).isEqualByComparingTo("0.0000");
+        assertThat(restored.status()).isEqualTo("DUE");
+        assertThat(restored.outstandingAmount()).isEqualByComparingTo("40000.0000");
+    }
+
+    @Test
+    void enforcesTheTenantAndPolicyWallWhenReversing() {
+        Policy policy = createPolicy("POL-CN-0031", new BigDecimal("120000.00"));
+        PolicyInstallment installment = createPlan(policy, today().plusDays(10))
+                .installments().getFirst();
+        PolicyCreditNote note = createNote(policy, "250.00");
+        issue(policy, note);
+        apply(policy, note, installment.id());
+
+        assertNotFound(() -> creditNoteService.updateStatus(OTHER_TENANT, policy.id(), note.id(),
+                new UpdateCreditNoteStatusRequest("REVERSED", null, "foreign tenant")));
+        Policy otherPolicy = createPolicy("POL-CN-0032", new BigDecimal("90000.00"));
+        assertNotFound(() -> creditNoteService.updateStatus(TENANT, otherPolicy.id(), note.id(),
+                new UpdateCreditNoteStatusRequest("REVERSED", null, "foreign policy")));
+
+        assertThat(noteById(policy, note.id()).status()).isEqualTo("APPLIED");
+        assertThat(billingService.get(TENANT, policy.id()).installments().getFirst()
+                .creditedAmount()).isEqualByComparingTo("250.0000");
+        assertThat(countEvents("policy.credit-note.reversed")).isZero();
+    }
+
+    @Test
+    void writesTheReversedEventWithTheReversalPayload() {
+        Policy policy = createPolicy("POL-CN-0033", new BigDecimal("120000.00"));
+        PolicyInstallment installment = createPlan(policy, today().plusDays(10))
+                .installments().getFirst();
+        PolicyCreditNote note = createNote(policy, "40000.00");
+        issue(policy, note);
+        apply(policy, note, installment.id());
+
+        reverse(policy, note, "customer dispute");
+
+        Map<String, Object> event = event("policy.credit-note.reversed", policy.id());
+        assertThat(event.get("aggregate_type")).isEqualTo("Policy");
+        assertThat(event.get("aggregate_version"))
+                .isEqualTo(policyService.get(TENANT, policy.id()).version() + 1L);
+        String payload = (String) event.get("payload");
+        assertThat(payload)
+                .contains("\"creditNoteId\":\"" + note.id() + "\"")
+                .contains("\"noteNumber\":\"" + note.noteNumber() + "\"")
+                .contains("\"installmentId\":\"" + installment.id() + "\"")
+                .contains("\"amount\":\"40000.0000\"")
+                .contains("\"reason\":\"customer dispute\"")
+                .contains("\"status\":\"REVERSED\"");
+        assertThat((String) event.get("headers"))
+                .contains("\"book\":\"DIRECT\"")
+                .contains("\"vertical\":\"policy\"");
+        OutboxEvent stored = outboxRepository.findById((UUID) event.get("id")).orElseThrow();
+        assertThat(stored.toEnvelope().book()).isEqualTo(Book.DIRECT);
+        assertThat(stored.toEnvelope().aggregateId()).isEqualTo(policy.id());
+    }
+
+    @Test
+    void reversalRollbackLeavesTheNoteAppliedAndTheCreditInPlace() {
+        Policy policy = createPolicy("POL-CN-0034", new BigDecimal("120000.00"));
+        PolicyInstallment installment = createPlan(policy, today().plusDays(10))
+                .installments().getFirst();
+        PolicyCreditNote note = createNote(policy, "250.00");
+        issue(policy, note);
+        apply(policy, note, installment.id());
+        int versionBefore = policyService.get(TENANT, policy.id()).version();
+
+        assertThatThrownBy(() -> transaction.executeWithoutResult(status -> {
+            reverse(policy, note, "rollback");
+            throw new IllegalStateException("force rollback");
+        })).isInstanceOf(IllegalStateException.class)
+                .hasMessage("force rollback");
+
+        PolicyCreditNote stored = noteById(policy, note.id());
+        assertThat(stored.status()).isEqualTo("APPLIED");
+        assertThat(stored.reversedAt()).isNull();
+        assertThat(stored.reversalReason()).isNull();
+        PolicyInstallment unchanged = billingService.get(TENANT, policy.id()).installments()
+                .getFirst();
+        assertThat(unchanged.status()).isEqualTo("DUE");
+        assertThat(unchanged.creditedAmount()).isEqualByComparingTo("250.0000");
+        assertThat(countEvents("policy.credit-note.reversed")).isZero();
+        assertThat(policyService.get(TENANT, policy.id()).version()).isEqualTo(versionBefore);
+    }
+
     private BillingPlanView createPlan(Policy policy) {
         return billingService.create(TENANT, policy.id(),
                 new CreateBillingPlanRequest(3, "MONTHLY", FIRST_DUE));
+    }
+
+    private BillingPlanView createPlan(Policy policy, LocalDate firstDue) {
+        return billingService.create(TENANT, policy.id(),
+                new CreateBillingPlanRequest(3, "MONTHLY", firstDue));
     }
 
     private PolicyCreditNote issue(Policy policy, PolicyCreditNote note) {
@@ -556,6 +877,26 @@ class CreditNoteServiceTest {
     private PolicyCreditNote apply(Policy policy, PolicyCreditNote note, UUID installmentId) {
         return creditNoteService.updateStatus(TENANT, policy.id(), note.id(),
                 new UpdateCreditNoteStatusRequest("APPLIED", installmentId));
+    }
+
+    private PolicyCreditNote reverse(Policy policy, PolicyCreditNote note, String reason) {
+        return creditNoteService.updateStatus(TENANT, policy.id(), note.id(),
+                new UpdateCreditNoteStatusRequest("REVERSED", null, reason));
+    }
+
+    private PolicyCreditNote noteById(Policy policy, UUID creditNoteId) {
+        return creditNoteService.list(TENANT, policy.id()).stream()
+                .filter(candidate -> candidate.id().equals(creditNoteId))
+                .findFirst().orElseThrow();
+    }
+
+    private String storedInstallmentStatus(UUID installmentId) {
+        return jdbc.queryForObject("SELECT status FROM policy_installment WHERE id = ?",
+                String.class, installmentId);
+    }
+
+    private static LocalDate today() {
+        return LocalDate.now(Clock.systemUTC());
     }
 
     private Policy createPolicy(String number, BigDecimal premium) {
@@ -570,7 +911,7 @@ class CreditNoteServiceTest {
 
     private Map<String, Object> event(String eventType, UUID policyId) {
         return jdbc.queryForMap("""
-                SELECT aggregate_type, aggregate_version, status, payload, headers
+                SELECT id, aggregate_type, aggregate_version, status, payload, headers
                   FROM outbox_event
                  WHERE aggregate_id = ? AND event_type = ?
                 """, policyId, eventType);

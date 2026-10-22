@@ -12,12 +12,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * Pure credit note rules: the DRAFT/ISSUED/APPLIED/CANCELLED graph, status and
- * currency vocabulary, positive money, and the 500-character reason cap.
+ * Pure credit note rules: the DRAFT/ISSUED/APPLIED/CANCELLED/REVERSED graph,
+ * status and currency vocabulary, positive money, the 500-character reason cap,
+ * and the reversal restore arithmetic.
  */
 class CreditNoteRulesTest {
     private static final UUID TENANT = UUID.fromString("11111111-1111-7111-8111-111111111111");
     private static final UUID POLICY_ID = UUID.fromString("33333333-3333-7333-8333-333333333333");
+    private static final LocalDate TODAY = LocalDate.of(2026, 6, 15);
 
     @Test
     void allowsOnlyTheDeclaredTransitions() {
@@ -28,22 +30,37 @@ class CreditNoteRulesTest {
         assertThat(CreditNoteRules.canTransition(
                 CreditNoteRules.DRAFT, CreditNoteRules.APPLIED)).isFalse();
         assertThat(CreditNoteRules.canTransition(
+                CreditNoteRules.DRAFT, CreditNoteRules.REVERSED)).isFalse();
+        assertThat(CreditNoteRules.canTransition(
                 CreditNoteRules.ISSUED, CreditNoteRules.APPLIED)).isTrue();
         assertThat(CreditNoteRules.canTransition(
                 CreditNoteRules.ISSUED, CreditNoteRules.CANCELLED)).isTrue();
+        assertThat(CreditNoteRules.canTransition(
+                CreditNoteRules.ISSUED, CreditNoteRules.REVERSED)).isFalse();
         assertThat(CreditNoteRules.canTransition(
                 CreditNoteRules.ISSUED, CreditNoteRules.ISSUED)).isFalse();
         assertThat(CreditNoteRules.canTransition(
                 CreditNoteRules.APPLIED, CreditNoteRules.CANCELLED)).isFalse();
         assertThat(CreditNoteRules.canTransition(
+                CreditNoteRules.APPLIED, CreditNoteRules.REVERSED)).isTrue();
+        assertThat(CreditNoteRules.canTransition(
+                CreditNoteRules.APPLIED, CreditNoteRules.ISSUED)).isFalse();
+        assertThat(CreditNoteRules.canTransition(
                 CreditNoteRules.CANCELLED, CreditNoteRules.ISSUED)).isFalse();
+        assertThat(CreditNoteRules.canTransition(
+                CreditNoteRules.CANCELLED, CreditNoteRules.REVERSED)).isFalse();
+        assertThat(CreditNoteRules.canTransition(
+                CreditNoteRules.REVERSED, CreditNoteRules.ISSUED)).isFalse();
+        assertThat(CreditNoteRules.canTransition(
+                CreditNoteRules.REVERSED, CreditNoteRules.APPLIED)).isFalse();
         assertThat(CreditNoteRules.canTransition(null, CreditNoteRules.ISSUED)).isFalse();
     }
 
     @Test
-    void treatsAppliedAndCancelledAsTerminal() {
+    void treatsAppliedCancelledAndReversedAsTerminal() {
         assertThat(CreditNoteRules.isTerminal(CreditNoteRules.APPLIED)).isTrue();
         assertThat(CreditNoteRules.isTerminal(CreditNoteRules.CANCELLED)).isTrue();
+        assertThat(CreditNoteRules.isTerminal(CreditNoteRules.REVERSED)).isTrue();
         assertThat(CreditNoteRules.isTerminal(CreditNoteRules.DRAFT)).isFalse();
         assertThat(CreditNoteRules.isTerminal(CreditNoteRules.ISSUED)).isFalse();
     }
@@ -56,6 +73,8 @@ class CreditNoteRulesTest {
                 .isEqualTo(CreditNoteRules.APPLIED);
         assertThat(CreditNoteRules.normalizeTargetStatus("cancelled"))
                 .isEqualTo(CreditNoteRules.CANCELLED);
+        assertThat(CreditNoteRules.normalizeTargetStatus(" Reversed "))
+                .isEqualTo(CreditNoteRules.REVERSED);
 
         assertBadRequest(() -> CreditNoteRules.normalizeTargetStatus("DRAFT"),
                 "INVALID_CREDIT_NOTE_STATUS");
@@ -96,6 +115,71 @@ class CreditNoteRulesTest {
 
         assertBadRequest(() -> CreditNoteRules.normalizeReason(reason),
                 "INVALID_CREDIT_NOTE_REASON");
+    }
+
+    @Test
+    void requiresATrimmedReversalReasonWithinTheLimit() {
+        assertThat(CreditNoteRules.normalizeReversalReason("  billing correction  "))
+                .isEqualTo("billing correction");
+        assertThat(CreditNoteRules.normalizeReversalReason(
+                "x".repeat(CreditNoteRules.MAX_REASON_LENGTH))).hasSize(500);
+
+        assertBadRequest(() -> CreditNoteRules.normalizeReversalReason(null),
+                "INVALID_CREDIT_NOTE_REASON");
+        assertBadRequest(() -> CreditNoteRules.normalizeReversalReason("   "),
+                "INVALID_CREDIT_NOTE_REASON");
+        assertBadRequest(() -> CreditNoteRules.normalizeReversalReason(
+                "x".repeat(CreditNoteRules.MAX_REASON_LENGTH + 1)),
+                "INVALID_CREDIT_NOTE_REASON");
+    }
+
+    @Test
+    void reversalClampsTheCreditedTotalAtZero() {
+        assertThat(CreditNoteRules.creditedAfterReversal(
+                installment("1000.0000", "500.0000", BillingRules.DUE),
+                new BigDecimal("200.00"))).isEqualByComparingTo("300.0000");
+        assertThat(CreditNoteRules.creditedAfterReversal(
+                installment("1000.0000", "100.0000", BillingRules.DUE),
+                new BigDecimal("200.00"))).isEqualByComparingTo("0.0000");
+        assertThat(CreditNoteRules.creditedAfterReversal(
+                installment("1000.0000", "0.0000", BillingRules.DUE),
+                new BigDecimal("200.00"))).isEqualByComparingTo("0.0000");
+        assertThat(CreditNoteRules.creditedAfterReversal(
+                installment("40000.0000", "40000.0000", BillingRules.CREDITED),
+                new BigDecimal("40000.00"))).isEqualByComparingTo("0.0000");
+    }
+
+    @Test
+    void reversalRestoresACreditedInstallmentToDueOrOverdue() {
+        PolicyInstallment future = installmentOn(TODAY.plusDays(10), "40000.0000",
+                "40000.0000", BillingRules.CREDITED);
+        assertThat(CreditNoteRules.statusAfterReversal(future, new BigDecimal("40000.00"), TODAY))
+                .isEqualTo(BillingRules.DUE);
+
+        PolicyInstallment dueToday = installmentOn(TODAY, "40000.0000", "40000.0000",
+                BillingRules.CREDITED);
+        assertThat(CreditNoteRules.statusAfterReversal(dueToday, new BigDecimal("40000.00"),
+                TODAY)).isEqualTo(BillingRules.DUE);
+
+        PolicyInstallment pastDue = installmentOn(TODAY.minusDays(1), "40000.0000",
+                "40000.0000", BillingRules.CREDITED);
+        assertThat(CreditNoteRules.statusAfterReversal(pastDue, new BigDecimal("40000.00"),
+                TODAY)).isEqualTo(BillingRules.OVERDUE);
+
+        PolicyInstallment partialCredited = installmentOn(TODAY.plusDays(10), "40000.0000",
+                "10000.0000", BillingRules.DUE);
+        assertThat(CreditNoteRules.statusAfterReversal(partialCredited,
+                new BigDecimal("10000.00"), TODAY)).isEqualTo(BillingRules.DUE);
+
+        PolicyInstallment overdue = installmentOn(TODAY.minusDays(3), "40000.0000",
+                "10000.0000", BillingRules.OVERDUE);
+        assertThat(CreditNoteRules.statusAfterReversal(overdue, new BigDecimal("10000.00"),
+                TODAY)).isEqualTo(BillingRules.OVERDUE);
+
+        PolicyInstallment paid = installmentOn(TODAY.plusDays(10), "40000.0000", "0.0000",
+                BillingRules.PAID);
+        assertThat(CreditNoteRules.statusAfterReversal(paid, new BigDecimal("10000.00"), TODAY))
+                .isEqualTo(BillingRules.PAID);
     }
 
     @Test
@@ -174,9 +258,13 @@ class CreditNoteRulesTest {
 
     private static PolicyInstallment installment(String amount, String creditedAmount,
                                                  String status) {
-        return new PolicyInstallment(UUID.randomUUID(), TENANT, POLICY_ID, 1,
-                LocalDate.of(2026, 2, 1), new BigDecimal(amount),
-                new BigDecimal(creditedAmount), status, null, null,
+        return installmentOn(LocalDate.of(2026, 2, 1), amount, creditedAmount, status);
+    }
+
+    private static PolicyInstallment installmentOn(LocalDate dueDate, String amount,
+                                                   String creditedAmount, String status) {
+        return new PolicyInstallment(UUID.randomUUID(), TENANT, POLICY_ID, 1, dueDate,
+                new BigDecimal(amount), new BigDecimal(creditedAmount), status, null, null,
                 Instant.parse("2026-01-01T00:00:00Z"));
     }
 

@@ -605,13 +605,14 @@ CREATE INDEX IF NOT EXISTS idx_billing_dunning_action_policy
     ON billing_dunning_action (tenant_id, policy_id, sent_at DESC);
 
 -- Policy credit notes (SPEC 11.2.13 billing adjustments). A credit note starts
--- DRAFT and then advances to ISSUED, APPLIED, or CANCELLED; note_number is
--- unique per policy and the sequence keeps concurrent creates collision-free.
--- issued_at/applied_at are set by the transition that reaches that state, so a
--- CANCELLED note never invents a timestamp. applied_installment_id names the
--- installment an APPLIED note was credited against; it stays nullable because
--- older APPLIED notes predate installment application and ISSUED/CANCELLED
--- notes never reference one.
+-- DRAFT and then advances to ISSUED, APPLIED, or CANCELLED; an APPLIED note can
+-- still be REVERSED. note_number is unique per policy and the sequence keeps
+-- concurrent creates collision-free. issued_at/applied_at/reversed_at are set by
+-- the transition that reaches that state, so a CANCELLED note never invents a
+-- timestamp. applied_installment_id names the installment an APPLIED note was
+-- credited against; it stays nullable because older APPLIED notes predate
+-- installment application and ISSUED/CANCELLED notes never reference one. The
+-- reversal keeps applied_installment_id for audit and adds reversal_reason.
 CREATE TABLE IF NOT EXISTS policy_credit_note (
     id UUID PRIMARY KEY,
     tenant_id UUID NOT NULL,
@@ -624,22 +625,43 @@ CREATE TABLE IF NOT EXISTS policy_credit_note (
     issued_at TIMESTAMPTZ,
     applied_at TIMESTAMPTZ,
     applied_installment_id UUID,
+    reversed_at TIMESTAMPTZ,
+    reversal_reason VARCHAR(500),
     created_at TIMESTAMPTZ NOT NULL,
     CONSTRAINT uq_policy_credit_note_number UNIQUE (policy_id, note_number),
     CONSTRAINT ck_policy_credit_note_amount CHECK (amount > 0),
     CONSTRAINT ck_policy_credit_note_reason
         CHECK (reason IS NULL OR CHAR_LENGTH(reason) <= 500),
     CONSTRAINT ck_policy_credit_note_status
-        CHECK (status IN ('DRAFT', 'ISSUED', 'APPLIED', 'CANCELLED')),
+        CHECK (status IN ('DRAFT', 'ISSUED', 'APPLIED', 'CANCELLED', 'REVERSED')),
     CONSTRAINT ck_policy_credit_note_issued
         CHECK (status NOT IN ('ISSUED', 'APPLIED') OR issued_at IS NOT NULL),
     CONSTRAINT ck_policy_credit_note_applied
-        CHECK (status <> 'APPLIED' OR applied_at IS NOT NULL)
+        CHECK (status <> 'APPLIED' OR applied_at IS NOT NULL),
+    CONSTRAINT ck_policy_credit_note_reversed
+        CHECK (status <> 'REVERSED' OR reversed_at IS NOT NULL),
+    CONSTRAINT ck_policy_credit_note_reversal_reason
+        CHECK (reversal_reason IS NULL OR CHAR_LENGTH(reversal_reason) <= 500)
 );
 
 -- Additive migration for databases that already have the credit note table.
+-- PostgreSQL has no ADD CONSTRAINT IF NOT EXISTS, so the status check is
+-- dropped and re-added to admit REVERSED on an already-migrated database.
 ALTER TABLE policy_credit_note
     ADD COLUMN IF NOT EXISTS applied_installment_id UUID;
+ALTER TABLE policy_credit_note
+    ADD COLUMN IF NOT EXISTS reversed_at TIMESTAMPTZ;
+ALTER TABLE policy_credit_note
+    ADD COLUMN IF NOT EXISTS reversal_reason VARCHAR(500);
+ALTER TABLE policy_credit_note DROP CONSTRAINT IF EXISTS ck_policy_credit_note_status;
+ALTER TABLE policy_credit_note ADD CONSTRAINT ck_policy_credit_note_status
+    CHECK (status IN ('DRAFT', 'ISSUED', 'APPLIED', 'CANCELLED', 'REVERSED'));
+ALTER TABLE policy_credit_note DROP CONSTRAINT IF EXISTS ck_policy_credit_note_reversed;
+ALTER TABLE policy_credit_note ADD CONSTRAINT ck_policy_credit_note_reversed
+    CHECK (status <> 'REVERSED' OR reversed_at IS NOT NULL);
+ALTER TABLE policy_credit_note DROP CONSTRAINT IF EXISTS ck_policy_credit_note_reversal_reason;
+ALTER TABLE policy_credit_note ADD CONSTRAINT ck_policy_credit_note_reversal_reason
+    CHECK (reversal_reason IS NULL OR CHAR_LENGTH(reversal_reason) <= 500);
 
 CREATE INDEX IF NOT EXISTS idx_policy_credit_note_policy
     ON policy_credit_note (tenant_id, policy_id, created_at DESC, note_number DESC);

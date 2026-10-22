@@ -211,9 +211,10 @@ class SchemaContractTest {
                 "CONSTRAINT uq_policy_credit_note_number UNIQUE (policy_id, note_number)");
         assertThat(schema).contains("CONSTRAINT ck_policy_credit_note_amount CHECK (amount > 0)");
         assertThat(schema).contains(
-                "CHECK (status IN ('DRAFT', 'ISSUED', 'APPLIED', 'CANCELLED'))");
+                "CHECK (status IN ('DRAFT', 'ISSUED', 'APPLIED', 'CANCELLED', 'REVERSED'))");
         assertThat(schema).contains("CONSTRAINT ck_policy_credit_note_issued");
         assertThat(schema).contains("CONSTRAINT ck_policy_credit_note_applied");
+        assertThat(schema).contains("CONSTRAINT ck_policy_credit_note_reversed");
         assertThat(schema).contains("issued_at TIMESTAMPTZ");
         assertThat(schema).contains("applied_at TIMESTAMPTZ");
         assertThat(schema).contains("applied_installment_id UUID");
@@ -221,6 +222,29 @@ class SchemaContractTest {
                 "ALTER TABLE policy_credit_note\n    ADD COLUMN IF NOT EXISTS applied_installment_id UUID");
         assertThat(schema).contains("idx_policy_credit_note_policy");
         assertThat(schema).contains("idx_policy_credit_note_installment");
+    }
+
+    @Test
+    void schemaAddsTheCreditNoteReversalWithAnIdempotentAlter() throws Exception {
+        String schema = schema();
+
+        assertThat(schema).contains("reversed_at TIMESTAMPTZ");
+        assertThat(schema).contains("reversal_reason VARCHAR(500)");
+        assertThat(schema).contains(
+                "ALTER TABLE policy_credit_note\n"
+                        + "    ADD COLUMN IF NOT EXISTS reversed_at TIMESTAMPTZ");
+        assertThat(schema).contains(
+                "ALTER TABLE policy_credit_note\n"
+                        + "    ADD COLUMN IF NOT EXISTS reversal_reason VARCHAR(500)");
+        assertThat(schema).contains(
+                "ALTER TABLE policy_credit_note DROP CONSTRAINT IF EXISTS "
+                        + "ck_policy_credit_note_status");
+        assertThat(schema).contains(
+                "ALTER TABLE policy_credit_note ADD CONSTRAINT ck_policy_credit_note_status\n"
+                        + "    CHECK (status IN "
+                        + "('DRAFT', 'ISSUED', 'APPLIED', 'CANCELLED', 'REVERSED'))");
+        assertThat(schema).contains(
+                "CHECK (status <> 'REVERSED' OR reversed_at IS NOT NULL)");
     }
 
     @Test

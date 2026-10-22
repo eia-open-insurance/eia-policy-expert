@@ -545,21 +545,42 @@ CREATE TABLE IF NOT EXISTS policy_credit_note (
     issued_at TIMESTAMP WITH TIME ZONE,
     applied_at TIMESTAMP WITH TIME ZONE,
     applied_installment_id UUID,
+    reversed_at TIMESTAMP WITH TIME ZONE,
+    reversal_reason VARCHAR(500),
     created_at TIMESTAMP WITH TIME ZONE NOT NULL,
     CONSTRAINT uq_policy_credit_note_number UNIQUE (policy_id, note_number),
     CONSTRAINT ck_policy_credit_note_amount CHECK (amount > 0),
     CONSTRAINT ck_policy_credit_note_reason
         CHECK (reason IS NULL OR CHAR_LENGTH(reason) <= 500),
     CONSTRAINT ck_policy_credit_note_status
-        CHECK (status IN ('DRAFT', 'ISSUED', 'APPLIED', 'CANCELLED')),
+        CHECK (status IN ('DRAFT', 'ISSUED', 'APPLIED', 'CANCELLED', 'REVERSED')),
     CONSTRAINT ck_policy_credit_note_issued
         CHECK (status NOT IN ('ISSUED', 'APPLIED') OR issued_at IS NOT NULL),
     CONSTRAINT ck_policy_credit_note_applied
-        CHECK (status <> 'APPLIED' OR applied_at IS NOT NULL)
+        CHECK (status <> 'APPLIED' OR applied_at IS NOT NULL),
+    CONSTRAINT ck_policy_credit_note_reversed
+        CHECK (status <> 'REVERSED' OR reversed_at IS NOT NULL),
+    CONSTRAINT ck_policy_credit_note_reversal_reason
+        CHECK (reversal_reason IS NULL OR CHAR_LENGTH(reversal_reason) <= 500)
 );
 
+-- H2-compatible copy of the reversal migration: H2 accepts the same
+-- ADD COLUMN IF NOT EXISTS and DROP/ADD CONSTRAINT forms.
 ALTER TABLE policy_credit_note
     ADD COLUMN IF NOT EXISTS applied_installment_id UUID;
+ALTER TABLE policy_credit_note
+    ADD COLUMN IF NOT EXISTS reversed_at TIMESTAMP WITH TIME ZONE;
+ALTER TABLE policy_credit_note
+    ADD COLUMN IF NOT EXISTS reversal_reason VARCHAR(500);
+ALTER TABLE policy_credit_note DROP CONSTRAINT IF EXISTS ck_policy_credit_note_status;
+ALTER TABLE policy_credit_note ADD CONSTRAINT ck_policy_credit_note_status
+    CHECK (status IN ('DRAFT', 'ISSUED', 'APPLIED', 'CANCELLED', 'REVERSED'));
+ALTER TABLE policy_credit_note DROP CONSTRAINT IF EXISTS ck_policy_credit_note_reversed;
+ALTER TABLE policy_credit_note ADD CONSTRAINT ck_policy_credit_note_reversed
+    CHECK (status <> 'REVERSED' OR reversed_at IS NOT NULL);
+ALTER TABLE policy_credit_note DROP CONSTRAINT IF EXISTS ck_policy_credit_note_reversal_reason;
+ALTER TABLE policy_credit_note ADD CONSTRAINT ck_policy_credit_note_reversal_reason
+    CHECK (reversal_reason IS NULL OR CHAR_LENGTH(reversal_reason) <= 500);
 
 CREATE INDEX IF NOT EXISTS idx_policy_credit_note_policy
     ON policy_credit_note (tenant_id, policy_id, created_at DESC, note_number DESC);

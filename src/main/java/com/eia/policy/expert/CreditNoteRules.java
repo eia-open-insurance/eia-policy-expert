@@ -1,6 +1,7 @@
 package com.eia.policy.expert;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -8,23 +9,25 @@ import java.util.UUID;
 
 /**
  * Pure credit note invariants: the status vocabulary, the one-way transition
- * graph, and request validation against the policy.
+ * graph, request validation against the policy, and the reversal arithmetic.
  *
  * <p>The lifecycle is DRAFT -&gt; ISSUED -&gt; APPLIED, with CANCELLED reachable
- * from DRAFT or ISSUED. APPLIED and CANCELLED are terminal, so any later
- * transition (including a replay of the same terminal status) is a state
- * conflict. Unknown status values are request errors instead.</p>
+ * from DRAFT or ISSUED and REVERSED reachable from APPLIED. APPLIED, CANCELLED,
+ * and REVERSED are terminal, so any later transition (including a replay of the
+ * same terminal status) is a state conflict. Unknown status values are request
+ * errors instead.</p>
  */
 final class CreditNoteRules {
     static final String DRAFT = "DRAFT";
     static final String ISSUED = "ISSUED";
     static final String APPLIED = "APPLIED";
     static final String CANCELLED = "CANCELLED";
+    static final String REVERSED = "REVERSED";
 
     static final int MAX_REASON_LENGTH = 500;
     static final int CURRENCY_LENGTH = 3;
 
-    private static final Set<String> TARGETS = Set.of(ISSUED, APPLIED, CANCELLED);
+    private static final Set<String> TARGETS = Set.of(ISSUED, APPLIED, CANCELLED, REVERSED);
 
     private CreditNoteRules() {
     }
@@ -77,11 +80,28 @@ final class CreditNoteRules {
         return value;
     }
 
+    /**
+     * A reversal must explain itself: unlike the optional creation reason, the
+     * reversal reason is required, trimmed, and capped at 500 characters.
+     */
+    static String normalizeReversalReason(String raw) {
+        if (raw == null || raw.isBlank()) {
+            throw PolicyErrors.badRequest("INVALID_CREDIT_NOTE_REASON", "reason",
+                    "reason is required when status is REVERSED.");
+        }
+        String value = raw.trim();
+        if (value.length() > MAX_REASON_LENGTH) {
+            throw PolicyErrors.badRequest("INVALID_CREDIT_NOTE_REASON", "reason",
+                    "reason must be at most " + MAX_REASON_LENGTH + " characters.");
+        }
+        return value;
+    }
+
     static String normalizeTargetStatus(String raw) {
         String value = raw == null ? "" : raw.trim().toUpperCase(Locale.ROOT);
         if (!TARGETS.contains(value)) {
             throw PolicyErrors.badRequest("INVALID_CREDIT_NOTE_STATUS", "status",
-                    "status must be ISSUED, APPLIED, or CANCELLED.");
+                    "status must be ISSUED, APPLIED, CANCELLED, or REVERSED.");
         }
         return value;
     }
@@ -93,12 +113,13 @@ final class CreditNoteRules {
         return switch (currentStatus) {
             case DRAFT -> ISSUED.equals(targetStatus) || CANCELLED.equals(targetStatus);
             case ISSUED -> APPLIED.equals(targetStatus) || CANCELLED.equals(targetStatus);
+            case APPLIED -> REVERSED.equals(targetStatus);
             default -> false;
         };
     }
 
     static boolean isTerminal(String status) {
-        return APPLIED.equals(status) || CANCELLED.equals(status);
+        return APPLIED.equals(status) || CANCELLED.equals(status) || REVERSED.equals(status);
     }
 
     /**
@@ -155,6 +176,37 @@ final class CreditNoteRules {
     static String statusAfterCredit(PolicyInstallment installment, BigDecimal noteAmount) {
         return creditedAfter(installment, noteAmount).compareTo(installment.amount()) >= 0
                 ? BillingRules.CREDITED : installment.status();
+    }
+
+    /**
+     * The persisted credited total after reversing {@code noteAmount}. The
+     * subtraction is clamped at zero so a note that no longer matches its
+     * original credit cannot drive the installment below the database's
+     * {@code credited_amount >= 0} invariant (SPEC BIL-06).
+     */
+    static BigDecimal creditedAfterReversal(PolicyInstallment installment, BigDecimal noteAmount) {
+        BigDecimal credited = Money.of(installment.creditedAmount().subtract(
+                Money.of(noteAmount)));
+        return credited.signum() < 0 ? Money.of(BigDecimal.ZERO) : credited;
+    }
+
+    /**
+     * Reversing a note releases its credit. A fully CREDITED installment that no
+     * longer covers its gross amount reopens as DUE when its due date is today
+     * or later and as OVERDUE when it is already past; any other status is kept
+     * (a partial credit on a DUE/OVERDUE row simply shrinks the credited total).
+     */
+    static String statusAfterReversal(PolicyInstallment installment, BigDecimal noteAmount,
+                                      LocalDate today) {
+        if (!BillingRules.CREDITED.equals(installment.status())) {
+            return installment.status();
+        }
+        BigDecimal credited = creditedAfterReversal(installment, noteAmount);
+        if (credited.compareTo(Money.of(installment.amount())) >= 0) {
+            return installment.status();
+        }
+        return installment.dueDate() != null && !installment.dueDate().isBefore(today)
+                ? BillingRules.DUE : BillingRules.OVERDUE;
     }
 
     record CreditNoteSpec(BigDecimal amount, String currency, String reason) {
