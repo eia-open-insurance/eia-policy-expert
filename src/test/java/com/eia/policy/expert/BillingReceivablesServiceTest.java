@@ -27,7 +27,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 @SpringBootTest
 @ActiveProfiles("test")
-class BillingReceivablesServiceTest {
+class BillingReceivablesServiceTest extends ProductCatalogTestSupport {
     private static final UUID TENANT = UUID.fromString("11111111-1111-7111-8111-111111111111");
     private static final UUID OTHER_TENANT = UUID.fromString("99999999-9999-7999-8999-999999999999");
     private static final UUID PARTY = UUID.fromString("22222222-2222-7222-8222-222222222222");

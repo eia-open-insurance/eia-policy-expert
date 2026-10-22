@@ -114,6 +114,8 @@ final class Problems {
             Map.entry("INVALID_PROGRAM_STATUS", "Invalid program status"),
             Map.entry("INVALID_PROGRAM_DATES", "Invalid program effective dates"),
             Map.entry("PROGRAM_NOT_FOUND", "Program not found"),
+            Map.entry("UNKNOWN_PRODUCT", "Unknown product"),
+            Map.entry("PRODUCT_NOT_ACTIVE", "Product is not active"),
             Map.entry("INVALID_LEGAL_ENTITY", "Invalid legal entity"),
             Map.entry("INVALID_LEGAL_ENTITY_CODE", "Invalid legal entity code"),
             Map.entry("INVALID_LEGAL_ENTITY_NAME", "Invalid legal entity name"),

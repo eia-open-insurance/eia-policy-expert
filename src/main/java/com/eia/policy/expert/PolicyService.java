@@ -26,12 +26,14 @@ public class PolicyService {
 
     private final PolicyRepository repository;
     private final PolicyVersionService versionService;
+    private final ProductCatalogGuard productCatalog;
     private final OutboxRepository outbox;
 
     public PolicyService(PolicyRepository repository, PolicyVersionService versionService,
-                         OutboxRepository outbox) {
+                         ProductCatalogGuard productCatalog, OutboxRepository outbox) {
         this.repository = repository;
         this.versionService = versionService;
+        this.productCatalog = productCatalog;
         this.outbox = outbox;
     }
 
@@ -68,10 +70,14 @@ public class PolicyService {
 
     /**
      * Creates a policy and stores the idempotency key in the same transaction.
-     * The key row is reserved before the policy row so a concurrent replay never
-     * leaves a second policy behind. Same key and same request returns the
-     * original policy with {@code replayed=true}; same key and a different
-     * request is {@code 409 IDEMPOTENCY_CONFLICT}.
+     * The product code must exist for the tenant and be ACTIVE. The idempotency
+     * check runs first so a replay of an already-accepted create still returns
+     * the original policy after its product is retired; only a genuinely new
+     * policy is checked against the catalog. The key row is reserved before the
+     * policy row so a concurrent replay never leaves a second policy behind.
+     * Same key and same request returns the original policy with
+     * {@code replayed=true}; same key and a different request is
+     * {@code 409 IDEMPOTENCY_CONFLICT}.
      */
     @Transactional
     public CreateResult create(CreatePolicyRequest request, String rawIdempotencyKey) {
@@ -80,6 +86,7 @@ public class PolicyService {
 
         String idempotencyKey = IdempotencyKeys.normalize(rawIdempotencyKey);
         if (idempotencyKey == null) {
+            productCatalog.requireActive(request.tenantId(), request.productCode());
             return new CreateResult(createPolicyWithInitialVersion(request, UUID.randomUUID()), false);
         }
 
@@ -90,6 +97,7 @@ public class PolicyService {
             return replayOrConflict(existing.get(), requestHash, request.tenantId());
         }
 
+        productCatalog.requireActive(request.tenantId(), request.productCode());
         UUID policyId = UUID.randomUUID();
         if (!repository.insertIdempotencyIfAbsent(
                 request.tenantId(), idempotencyKey, requestHash, policyId)) {
@@ -159,6 +167,19 @@ public class PolicyService {
                     PolicyEvents.versionIssued(updated, issuedVersion, now)));
         }
         return updated;
+    }
+
+    /**
+     * Creates the policy for an already-accepted aggregate, such as submission
+     * conversion. That product was validated against the catalog when the
+     * aggregate was created, so this path intentionally skips the ACTIVE-catalog
+     * guard: retiring the product afterwards must not invalidate the conversion.
+     */
+    @Transactional
+    public Policy createConvertedPolicy(CreatePolicyRequest request) {
+        PolicyRules.validateCreate(request.status(), request.effectiveDate(),
+                request.expirationDate(), request.premiumAmount(), request.limitAmount());
+        return createPolicyWithInitialVersion(request, UUID.randomUUID());
     }
 
     private Policy createPolicyWithInitialVersion(CreatePolicyRequest request, UUID policyId) {

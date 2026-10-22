@@ -145,6 +145,16 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   `PRODUCTS_LIABILITY`/Products Liability, and `UMBRELLA`/Umbrella, all in
   `US`, keyed by `(tenant_id, product_code)`, never overwriting an existing row,
   writing no events, and disabled by `eia.product.seed.enabled=false`.
+- Active-product enforcement on new business: policy and underwriting-submission
+  creates require a tenant product that exists and is `ACTIVE`. An unknown code
+  is `422 UNKNOWN_PRODUCT`; a `RETIRED` code is `422 PRODUCT_NOT_ACTIVE`; both
+  carry `errors[0].field=productCode` and `meta.productCode`/`meta.tenantId`
+  (plus `meta.productId`/`meta.productStatus` for the retired form). The code is
+  trimmed and upper-cased for the tenant-scoped lookup. Rejected creates write
+  no row, number allocation, or event. Existing policies/submissions and
+  idempotent create replays are never re-validated, and submission conversion
+  and renewal deliberately bypass the guard so retiring a product cannot
+  invalidate accepted business.
 - Policy credit note slice: idempotent `policy_credit_note` table with a
   positive `numeric(19,4)` amount in the policy currency, an optional
   500-character reason, a per-policy unique `note_number`

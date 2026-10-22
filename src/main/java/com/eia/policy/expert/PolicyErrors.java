@@ -45,8 +45,13 @@ public final class PolicyErrors {
     }
 
     public static ApiException businessRule(String code, String field, String message) {
+        return businessRule(code, field, message, Map.of());
+    }
+
+    public static ApiException businessRule(String code, String field, String message,
+                                            Map<String, Object> meta) {
         return new ApiException(HttpStatus.UNPROCESSABLE_ENTITY, code, message,
-                List.of(new ApiException.FieldIssue(field, code, message)));
+                List.of(new ApiException.FieldIssue(field, code, message)), meta);
     }
 
     public static ApiException approvalRequired(String code, String field, String message) {

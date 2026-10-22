@@ -29,8 +29,10 @@ import java.util.UUID;
  *
  * <p>The policy is created through {@link PolicyService} so it gets the normal
  * server-allocated {@code POL-YYYY-NNNNNNN} number, initial DRAFT policy
- * version, and {@code policy.policy.created} event. Conversion then adds one
- * base coverage and its limit schedule when the submission requested a
+ * version, and {@code policy.policy.created} event. It uses the submission's
+ * already-accepted product and therefore bypasses the ACTIVE-catalog guard: a
+ * product retired after intake must not block the conversion. Conversion then
+ * adds one base coverage and its limit schedule when the submission requested a
  * positive limit. Coverage and limit invariants come from
  * {@link CoverageRules}, the same rules the coverage command uses; the limit is
  * both the each-occurrence and the aggregate amount because the submission
@@ -105,7 +107,7 @@ public class SubmissionConversionService {
                 UnderwritingSubmissionRules.validateConversion(submission, request);
         Instant now = Instant.now(clock).truncatedTo(ChronoUnit.MICROS);
 
-        Policy created = policyService.create(new CreatePolicyRequest(
+        Policy created = policyService.createConvertedPolicy(new CreatePolicyRequest(
                 tenantId,
                 null,
                 submission.productCode(),

@@ -73,7 +73,7 @@ class SubmissionConversionServiceTest {
                 .thenReturn(Optional.of(quoted));
         when(policyRepository.findBySubmissionId(TENANT, SUBMISSION_ID))
                 .thenReturn(Optional.empty());
-        when(policyService.create(any(CreatePolicyRequest.class))).thenReturn(draft);
+        when(policyService.createConvertedPolicy(any(CreatePolicyRequest.class))).thenReturn(draft);
         when(policyRepository.assignSubmission(eq(TENANT), eq(POLICY_ID), eq(SUBMISSION_ID),
                 eq(0), any(Instant.class))).thenReturn(1);
         when(policyRepository.findById(TENANT, POLICY_ID)).thenReturn(Optional.of(linked));
@@ -96,7 +96,7 @@ class SubmissionConversionServiceTest {
 
         ArgumentCaptor<CreatePolicyRequest> policyRequest =
                 ArgumentCaptor.forClass(CreatePolicyRequest.class);
-        verify(policyService).create(policyRequest.capture());
+        verify(policyService).createConvertedPolicy(policyRequest.capture());
         assertThat(policyRequest.getValue().tenantId()).isEqualTo(TENANT);
         assertThat(policyRequest.getValue().productCode()).isEqualTo("CGL_PRODUCTS");
         assertThat(policyRequest.getValue().insuredPartyId()).isEqualTo(APPLICANT);
@@ -209,7 +209,7 @@ class SubmissionConversionServiceTest {
                 .thenReturn(Optional.of(bound));
         when(policyRepository.findBySubmissionId(TENANT, SUBMISSION_ID))
                 .thenReturn(Optional.empty());
-        when(policyService.create(any(CreatePolicyRequest.class))).thenReturn(draft);
+        when(policyService.createConvertedPolicy(any(CreatePolicyRequest.class))).thenReturn(draft);
         when(policyRepository.assignSubmission(eq(TENANT), eq(POLICY_ID), eq(SUBMISSION_ID),
                 eq(0), any(Instant.class))).thenReturn(1);
         when(policyRepository.findById(TENANT, POLICY_ID)).thenReturn(Optional.of(linked));
@@ -241,7 +241,7 @@ class SubmissionConversionServiceTest {
                 .thenReturn(Optional.of(quoted));
         when(policyRepository.findBySubmissionId(TENANT, SUBMISSION_ID))
                 .thenReturn(Optional.empty());
-        when(policyService.create(any(CreatePolicyRequest.class))).thenReturn(draft);
+        when(policyService.createConvertedPolicy(any(CreatePolicyRequest.class))).thenReturn(draft);
         when(policyRepository.assignSubmission(eq(TENANT), eq(POLICY_ID), eq(SUBMISSION_ID),
                 eq(0), any(Instant.class))).thenReturn(1);
         when(policyRepository.findById(TENANT, POLICY_ID)).thenReturn(Optional.of(linked));

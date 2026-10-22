@@ -20,9 +20,11 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
@@ -42,7 +44,14 @@ class PolicyServiceTest {
     private PolicyVersionService versionService;
 
     @Mock
+    private ProductCatalogGuard productCatalog;
+
+    @Mock
     private OutboxRepository outbox;
+
+    private PolicyService service() {
+        return new PolicyService(repository, versionService, productCatalog, outbox);
+    }
 
     @Test
     void storesIdempotencyKeyInTheSameTransactionBeforeCreatingThePolicy() {
@@ -52,7 +61,7 @@ class PolicyServiceTest {
         when(repository.create(any(CreatePolicyRequest.class), any(UUID.class)))
                 .thenReturn(policy("DRAFT", 0));
 
-        CreateResult result = new PolicyService(repository, versionService, outbox).create(request(), "idem-1");
+        CreateResult result = service().create(request(), "idem-1");
 
         assertThat(result.replayed()).isFalse();
         assertThat(result.policy().status()).isEqualTo("DRAFT");
@@ -70,7 +79,7 @@ class PolicyServiceTest {
                         POLICY_ID, IdempotencyKeys.requestHash(request))));
         when(repository.findById(TENANT, POLICY_ID)).thenReturn(Optional.of(policy("DRAFT", 0)));
 
-        CreateResult result = new PolicyService(repository, versionService, outbox).create(request, "idem-1");
+        CreateResult result = service().create(request, "idem-1");
 
         assertThat(result.replayed()).isTrue();
         assertThat(result.policy().id()).isEqualTo(POLICY_ID);
@@ -83,7 +92,7 @@ class PolicyServiceTest {
         when(repository.findIdempotency(TENANT, "idem-1"))
                 .thenReturn(Optional.of(new IdempotencyRecord(POLICY_ID, "different-hash")));
 
-        assertThatThrownBy(() -> new PolicyService(repository, versionService, outbox).create(request, "idem-1"))
+        assertThatThrownBy(() -> service().create(request, "idem-1"))
                 .isInstanceOf(ApiException.class)
                 .satisfies(ex -> {
                     ApiException api = (ApiException) ex;
@@ -106,7 +115,7 @@ class PolicyServiceTest {
                 .thenReturn(false);
         when(repository.findById(TENANT, POLICY_ID)).thenReturn(Optional.of(policy("DRAFT", 0)));
 
-        CreateResult result = new PolicyService(repository, versionService, outbox).create(request, "idem-1");
+        CreateResult result = service().create(request, "idem-1");
 
         assertThat(result.replayed()).isTrue();
         assertThat(result.policy().id()).isEqualTo(POLICY_ID);
@@ -118,7 +127,7 @@ class PolicyServiceTest {
         when(repository.create(any(CreatePolicyRequest.class), any(UUID.class)))
                 .thenReturn(policy("DRAFT", 0));
 
-        CreateResult result = new PolicyService(repository, versionService, outbox).create(request(), null);
+        CreateResult result = service().create(request(), null);
 
         assertThat(result.replayed()).isFalse();
         verify(repository).create(any(CreatePolicyRequest.class), any(UUID.class));
@@ -126,10 +135,56 @@ class PolicyServiceTest {
     }
 
     @Test
+    void checksTheProductCatalogBeforeCreatingANewPolicy() {
+        when(repository.create(any(CreatePolicyRequest.class), any(UUID.class)))
+                .thenReturn(policy("DRAFT", 0));
+
+        service().create(request(), null);
+
+        verify(productCatalog).requireActive(TENANT, "CGL");
+    }
+
+    @Test
+    void aRetiredProductRejectionCreatesNoPolicy() {
+        ApiException rejected = PolicyErrors.businessRule("PRODUCT_NOT_ACTIVE", "productCode",
+                "Product code CGL is RETIRED; only an ACTIVE product can be used for new business.");
+        doThrow(rejected).when(productCatalog).requireActive(TENANT, "CGL");
+
+        assertThatThrownBy(() -> service().create(request(), null)).isSameAs(rejected);
+
+        verify(repository, never()).create(any(CreatePolicyRequest.class), any(UUID.class));
+    }
+
+    @Test
+    void anIdempotentCreateReplayDoesNotRecheckTheCatalog() {
+        CreatePolicyRequest request = request();
+        when(repository.findIdempotency(TENANT, "idem-1"))
+                .thenReturn(Optional.of(new IdempotencyRecord(
+                        POLICY_ID, IdempotencyKeys.requestHash(request))));
+        when(repository.findById(TENANT, POLICY_ID)).thenReturn(Optional.of(policy("DRAFT", 0)));
+
+        service().create(request, "idem-1");
+
+        verifyNoInteractions(productCatalog);
+    }
+
+    @Test
+    void conversionCreatesWithoutRecheckingTheCatalog() {
+        when(repository.create(any(CreatePolicyRequest.class), any(UUID.class)))
+                .thenReturn(policy("DRAFT", 0));
+
+        Policy created = service().createConvertedPolicy(request());
+
+        assertThat(created.status()).isEqualTo("DRAFT");
+        verifyNoInteractions(productCatalog);
+        verify(versionService).createInitialVersion(eq(created), any(UUID.class));
+    }
+
+    @Test
     void rejectsStaleIfMatchBeforeUpdating() {
         when(repository.findById(TENANT, POLICY_ID)).thenReturn(Optional.of(policy("DRAFT", 2)));
 
-        assertThatThrownBy(() -> new PolicyService(repository, versionService, outbox).updateStatus(
+        assertThatThrownBy(() -> service().updateStatus(
                 TENANT, POLICY_ID, new UpdatePolicyStatusRequest("QUOTED", 0, null), "\"1\""))
                 .isInstanceOf(ApiException.class)
                 .satisfies(ex -> {
@@ -149,7 +204,7 @@ class PolicyServiceTest {
         when(repository.updateStatus(TENANT, POLICY_ID, "QUOTED", null, 2))
                 .thenReturn(policy("QUOTED", 3));
 
-        Policy result = new PolicyService(repository, versionService, outbox).updateStatus(
+        Policy result = service().updateStatus(
                 TENANT, POLICY_ID, new UpdatePolicyStatusRequest("QUOTED", 0, null), "*");
 
         assertThat(result.status()).isEqualTo("QUOTED");
@@ -162,7 +217,7 @@ class PolicyServiceTest {
                 .thenReturn(Optional.of(policy("BOUND", 3)));
         when(repository.countNamedInsured(TENANT, POLICY_ID)).thenReturn(0);
 
-        assertThatThrownBy(() -> new PolicyService(repository, versionService, outbox).updateStatus(
+        assertThatThrownBy(() -> service().updateStatus(
                 TENANT, POLICY_ID, new UpdatePolicyStatusRequest("ISSUED", 3, null), "\"3\""))
                 .isInstanceOf(ApiException.class)
                 .satisfies(ex -> {
@@ -183,7 +238,7 @@ class PolicyServiceTest {
         when(repository.updateStatus(TENANT, POLICY_ID, "ISSUED", null, 3))
                 .thenReturn(policy("ISSUED", 4));
 
-        Policy result = new PolicyService(repository, versionService, outbox).updateStatus(
+        Policy result = service().updateStatus(
                 TENANT, POLICY_ID, new UpdatePolicyStatusRequest("ISSUED", 3, null), "\"3\"");
 
         assertThat(result.status()).isEqualTo("ISSUED");
@@ -195,7 +250,7 @@ class PolicyServiceTest {
         when(repository.create(any(CreatePolicyRequest.class), any(UUID.class)))
                 .thenReturn(policy("DRAFT", 0));
 
-        Policy created = new PolicyService(repository, versionService, outbox).create(request());
+        Policy created = service().create(request());
 
         assertThat(created.status()).isEqualTo("DRAFT");
         verify(versionService).createInitialVersion(eq(created), any(UUID.class));

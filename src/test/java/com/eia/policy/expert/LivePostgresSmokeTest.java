@@ -38,7 +38,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @EnabledIfEnvironmentVariable(named = "EIA_LIVE_PG", matches = "(?i)true")
-class LivePostgresSmokeTest {
+class LivePostgresSmokeTest extends ProductCatalogTestSupport {
     private static final UUID TENANT = UUID.randomUUID();
     private static final UUID INSURED_PARTY = UUID.fromString("22222222-2222-7222-8222-222222222222");
     private static final UUID CLAIM_ID = UUID.fromString("99999999-9999-7999-8999-999999999999");
@@ -74,13 +74,15 @@ class LivePostgresSmokeTest {
                 "policy_limit_erosion", "policy_limit_state", "policy_limit", "policy_coverage",
                 "policy_endorsement", "policy_insured", "policy_location", "policy_cancellation",
                 "policy_reinstatement", "policy_version", "policy_command_idempotency",
-                "policy_idempotency", "policy"}) {
+                "policy_idempotency", "policy", "product"}) {
             jdbc.update("DELETE FROM " + table + " WHERE tenant_id = ?", TENANT);
         }
     }
 
     @Test
     void issueEndorseCoverageCancelFlow() throws Exception {
+        seedActiveProduct(TENANT, "CGL");
+
         // 1. Create the draft policy, then replay the same request idempotently.
         Map<String, Object> create = Map.of(
                 "tenantId", TENANT,

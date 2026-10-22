@@ -322,6 +322,16 @@ the current status is an idempotent no-op. Every accepted create and status
 change writes `product.product.created` or `product.product.status-changed`
 against the `Product` aggregate in the same transaction.
 
+New policy and underwriting-submission creates require an `ACTIVE` product in
+the tenant catalog. The request code is trimmed and upper-cased for the lookup,
+so `cgl` matches `CGL`. An unknown code is `422 UNKNOWN_PRODUCT`; a known but
+`RETIRED` code is `422 PRODUCT_NOT_ACTIVE`. Both problems carry
+`errors[0].field=productCode` with the same code and `meta.productCode` and
+`meta.tenantId`; the retired form adds `meta.productId` and
+`meta.productStatus=RETIRED`. Retiring a product never re-validates existing
+policies or submissions, and it never blocks an idempotent create replay or a
+submission-to-policy conversion that was accepted while the product was active.
+
 The demo tenant `11111111-1111-7111-8111-111111111111` is seeded idempotently
 at startup with `CGL`/Commercial General Liability, `PRODUCTS_LIABILITY`/
 Products Liability, and `UMBRELLA`/Umbrella, all in `US`. The seed is keyed by
@@ -341,7 +351,9 @@ same controller keeps the `/internal/v1` alias for the domain adapter):
 
 The create body is `{applicantPartyId, productCode, requestedEffectiveDate,
 requestedLimitAmount, requestedLimitCurrency, tortCodes[], notes?}`. The product
-code is capped at 64 characters, the currency is a three-letter ISO 4217 code
+code must name an `ACTIVE` product for the tenant (`422 UNKNOWN_PRODUCT` or
+`422 PRODUCT_NOT_ACTIVE`, checked before a submission number is allocated) and
+is capped at 64 characters; the currency is a three-letter ISO 4217 code
 (stored upper-case), the limit is non-negative, `tortCodes` holds at most 20
 codes of at most 32 characters each, and notes are capped at 2000 characters.
 `tortCodes` is a PostgreSQL `text[]`; a missing list is stored as an empty array
@@ -363,7 +375,9 @@ another tenant is `404 SUBMISSION_NOT_FOUND`.
 `{premiumAmount, premiumCurrency, expirationDate?}` and creates a `DRAFT` policy
 from the submission's applicant, product, requested effective date, and
 requested limit, with the supplied premium and with `expirationDate` defaulting
-to the effective date plus one year. The policy gets the normal
+to the effective date plus one year. The product was validated at submission
+intake, so conversion does not re-check the catalog and still succeeds if that
+product has been retired since. The policy gets the normal
 `POL-YYYY-NNNNNNN` number, an initial DRAFT version, and one base coverage and
 limit (code derived from the product code) when the requested limit is
 positive. The policy records `submissionId`, the submission becomes `BOUND`, both
@@ -488,7 +502,11 @@ and `lastDunningAt` from the latest `SENT` dunning action for the installment
   `Idempotency-Key`; the first call is `201`, a replay of the same canonical
   request is `200` with `Idempotent-Replayed: true` and the stored response
   body/ETag, and a changed request under the same key is `409
-  IDEMPOTENCY_CONFLICT`.
+  IDEMPOTENCY_CONFLICT`. A policy-create replay is resolved before the
+  active-product check, so it keeps working after the product is retired.
+- New policy and submission creates validate `productCode` against the tenant
+  product catalog; unknown and retired codes are `422 UNKNOWN_PRODUCT` and
+  `422 PRODUCT_NOT_ACTIVE`.
 
 ## Local development
 

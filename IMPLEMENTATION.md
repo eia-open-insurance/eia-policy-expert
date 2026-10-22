@@ -16,7 +16,8 @@ capacity with its currency, derived used/utilization/policy-count reads, plus
 the nullable `policy.program_id` assignment), a legal entity catalog slice (tenant-unique
 upper-case codes plus the nullable `policy.legal_entity_id` assignment), a
 product catalog slice (tenant-unique upper-case codes, the requested five
-product lines, ACTIVE/RETIRED status, and an idempotent demo-tenant seed), and a
+product lines, ACTIVE/RETIRED status, active-product enforcement on new
+policies and submissions, and an idempotent demo-tenant seed), and a
 credit note slice (DRAFT/ISSUED/APPLIED/CANCELLED/REVERSED billing adjustments
 with per-policy numbering, cancellation return-premium links, application to open
 installments, and credit reversal), and an underwriting submission slice
@@ -52,6 +53,7 @@ outbox (SPEC 7.5.1) in the same database transaction as the aggregate write.
 | `PolicyProgramController` / `PolicyProgramService` / `PolicyProgramRepository` | Commercial program catalog, optional capacity with the derived usage projection, policy assignment/clear, and the program outbox events |
 | `LegalEntityController` / `LegalEntityService` / `LegalEntityRepository` | Legal entity catalog, policy assignment/clear, and the legal entity outbox events |
 | `ProductController` / `ProductService` / `ProductRepository` / `ProductEvents` | Product catalog, q/status reads, ACTIVE/RETIRED status changes, and the product outbox events |
+| `ProductCatalogGuard` | ACTIVE-product check shared by policy and submission create; 422 `UNKNOWN_PRODUCT`/`PRODUCT_NOT_ACTIVE` with `productCode` and `meta` |
 | `ProductSeeder` / `ProductSeedRunner` | Idempotent demo-tenant product seed and its conditional startup hook |
 | `UnderwritingSubmissionController` / `UnderwritingSubmissionService` / `UnderwritingSubmissionRepository` / `UnderwritingSubmissionNumberAllocator` | Tenant-numbered underwriting submissions, q/status reads, the one-way status graph, and the submission outbox events |
 | `SubmissionConversionService` / `ConvertSubmissionRequest` / `SubmissionConversionResult` | Quoted/bound submission conversion into a DRAFT policy, the `policy.submission_id` link, derived base coverage/limit, and idempotent replay of the linked policy |
@@ -175,6 +177,28 @@ emitted against the `LegalEntity` aggregate (`aggregateVersion=1`, payload
 Neither name is listed in `eia-contracts/asyncapi/policy.yaml` or
 `event-catalog.yaml` yet, and the contract still marks `/legal-entities` as
 planned.
+
+### Active-product enforcement for new business
+
+New policies and new underwriting submissions must name an ACTIVE product in the
+tenant's product catalog. The shared `ProductCatalogGuard` trims and upper-cases
+the request code before the tenant-scoped catalog read, so `cgl` matches the
+stored `CGL`. An unknown code is `422 UNKNOWN_PRODUCT`; a known but `RETIRED`
+code is `422 PRODUCT_NOT_ACTIVE`. Both problems carry
+`errors[0].field=productCode` with the same stable code, and `meta` carries
+`productCode` and `tenantId`; the retired form also carries `productId` and
+`productStatus=RETIRED`. Rejected creates write no policy, submission, number
+allocation, or event.
+
+The check is for new business only. Existing policies and submissions are never
+re-validated. Submission conversion uses the product accepted on the submission
+and calls `PolicyService.createConvertedPolicy`, deliberately bypassing the
+guard, so a conversion accepted before retirement still succeeds afterwards.
+Renewal likewise copies its source term without a catalog check. An idempotent
+policy-create replay is resolved before the guard, so replaying an
+already-accepted create also keeps returning the original policy after the
+product is retired. The guard runs before the submission number is allocated, so
+a rejected submission intake never consumes a number.
 
 The product catalog events use the requested `product.product.created` and
 `product.product.status-changed` names, which imply the `product` event
@@ -380,8 +404,10 @@ tenant can race on the counter-row insert; the losing transaction rolls back and
 the service retries against the committed row.
 
 The create body is `{applicantPartyId, productCode, requestedEffectiveDate,
-requestedLimitAmount, requestedLimitCurrency, tortCodes[], notes?}`. A new
-submission is `RECEIVED` with `version=0`; `createdAt` and `updatedAt` are
+requestedLimitAmount, requestedLimitCurrency, tortCodes[], notes?}`. The product
+code must name an ACTIVE product for the tenant
+(`422 UNKNOWN_PRODUCT`/`PRODUCT_NOT_ACTIVE`) before the number is allocated. A
+new submission is `RECEIVED` with `version=0`; `createdAt` and `updatedAt` are
 server-owned and microsecond-truncated. The caps are product code 64, currency
 three ISO 4217 letters (stored upper-case), non-negative limit, at most 20 tort
 codes of at most 32 characters each, and notes at most 2000 characters. Blank
@@ -436,9 +462,12 @@ upper-case; `expirationDate` defaults to the requested effective date plus one
 year and an explicit value must be strictly after that effective date
 (`400 INVALID_CONVERSION_EXPIRATION`).
 
-The command creates a normal `DRAFT` policy through the policy create path, so
-the server allocates `POL-{YYYY}-{7 digits}`, writes the initial DRAFT
-`policy_version`, and emits `policy.policy.created`. The policy takes the
+The command creates a normal `DRAFT` policy through the policy create path, but
+it uses `PolicyService.createConvertedPolicy` so the ACTIVE-product guard is not
+re-applied: the submission product was validated at intake and conversion stays
+valid if that product is retired in between. The server allocates
+`POL-{YYYY}-{7 digits}`, writes the initial DRAFT `policy_version`, and emits
+`policy.policy.created`. The policy takes the
 submission's applicant, product, requested effective date, and
 requested limit/currency, plus the command premium. When the requested limit is
 positive, conversion also writes one base coverage and its limit schedule using
@@ -494,7 +523,9 @@ The live smoke is opt-in and requires PostgreSQL.
   `external_code_map` columns are not exposed. `jurisdiction` is a two-letter
   code as requested by this slice, while the wider SPEC model uses
   `domicile_country` (ISO 3166-1 alpha-3).
-- The product catalog is create/list/get plus ACTIVE/RETIRED status only. The
+- The product catalog is create/list/get plus ACTIVE/RETIRED status only, and
+  new policy/submission creates require an ACTIVE row; there is no automatic
+  product creation, grace period, or backfill of legacy rows. The
   SPEC 11.2.14 `product_version`, `form_family`, effective dates, owner, and
   the wider DRAFT/FILED/APPROVED/SUSPENDED lifecycle are not modelled; this
   slice uses the requested CGL/PRODUCTS_LIABILITY/UMBRELLA/EXCESS/OTHER taxonomy

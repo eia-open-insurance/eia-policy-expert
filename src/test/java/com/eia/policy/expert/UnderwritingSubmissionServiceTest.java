@@ -53,11 +53,14 @@ class UnderwritingSubmissionServiceTest {
     private PolicyRepository policyRepository;
 
     @Mock
+    private ProductCatalogGuard productCatalog;
+
+    @Mock
     private OutboxRepository outbox;
 
     private UnderwritingSubmissionService service() {
         return new UnderwritingSubmissionService(repository, numberAllocator, policyRepository,
-                outbox, Clock.fixed(NOW, ZoneOffset.UTC));
+                productCatalog, outbox, Clock.fixed(NOW, ZoneOffset.UTC));
     }
 
     @Test
@@ -156,6 +159,26 @@ class UnderwritingSubmissionServiceTest {
     }
 
     @Test
+    void checksTheActiveProductBeforeAllocatingTheNumber() {
+        when(numberAllocator.next(TENANT)).thenReturn(1L);
+
+        service().create(TENANT, request());
+
+        verify(productCatalog).requireActive(TENANT, "CGL_PRODUCTS");
+    }
+
+    @Test
+    void anUnknownProductIsRejectedBeforeTheNumberIsAllocated() {
+        ApiException rejected = PolicyErrors.businessRule("UNKNOWN_PRODUCT", "productCode",
+                "Product code CGL_PRODUCTS does not exist in this tenant's product catalog.");
+        doThrow(rejected).when(productCatalog).requireActive(TENANT, "CGL_PRODUCTS");
+
+        assertThatThrownBy(() -> service().create(TENANT, request())).isSameAs(rejected);
+
+        verifyNoInteractions(repository, numberAllocator, outbox);
+    }
+
+    @Test
     void invalidCreateDoesNotAllocateAValidateOrWriteAnEvent() {
         assertThatThrownBy(() -> service().create(TENANT,
                 new CreateUnderwritingSubmissionRequest(APPLICANT, "P".repeat(65), EFFECTIVE,
@@ -164,7 +187,7 @@ class UnderwritingSubmissionServiceTest {
                 .satisfies(ex -> assertThat(((ApiException) ex).code())
                         .isEqualTo("INVALID_SUBMISSION_PRODUCT_CODE"));
 
-        verifyNoInteractions(repository, numberAllocator, outbox);
+        verifyNoInteractions(repository, numberAllocator, productCatalog, outbox);
     }
 
     @Test

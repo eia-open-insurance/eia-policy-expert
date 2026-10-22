@@ -22,8 +22,11 @@ import java.util.UUID;
  * Underwriting submission slice (SPEC 11.2.14 intake).
  *
  * <p>A submission is created {@code RECEIVED} with a server-generated
- * {@code SUB-YYYY-NNNNNNN} number that is unique per tenant. The only mutation
- * is the one-way status graph in {@link UnderwritingSubmissionRules};
+ * {@code SUB-YYYY-NNNNNNN} number that is unique per tenant. Its product code
+ * must be an ACTIVE catalog product for the tenant
+ * ({@link ProductCatalogGuard}); the product is validated once, at intake, and
+ * a later retirement never invalidates an existing submission. The only
+ * mutation is the one-way status graph in {@link UnderwritingSubmissionRules};
  * {@code BOUND}, {@code DECLINED}, and {@code WITHDRAWN} are terminal. Every
  * accepted create and transition writes {@code policy.submission.created} or
  * {@code policy.submission.status-changed} in the same transaction as the row
@@ -40,6 +43,7 @@ public class UnderwritingSubmissionService {
     private final UnderwritingSubmissionRepository repository;
     private final UnderwritingSubmissionNumberAllocator numberAllocator;
     private final PolicyRepository policyRepository;
+    private final ProductCatalogGuard productCatalog;
     private final OutboxRepository outbox;
     private final Clock clock;
 
@@ -47,17 +51,21 @@ public class UnderwritingSubmissionService {
     public UnderwritingSubmissionService(UnderwritingSubmissionRepository repository,
                                          UnderwritingSubmissionNumberAllocator numberAllocator,
                                          PolicyRepository policyRepository,
+                                         ProductCatalogGuard productCatalog,
                                          OutboxRepository outbox) {
-        this(repository, numberAllocator, policyRepository, outbox, Clock.systemUTC());
+        this(repository, numberAllocator, policyRepository, productCatalog, outbox,
+                Clock.systemUTC());
     }
 
     UnderwritingSubmissionService(UnderwritingSubmissionRepository repository,
                                   UnderwritingSubmissionNumberAllocator numberAllocator,
                                   PolicyRepository policyRepository,
+                                  ProductCatalogGuard productCatalog,
                                   OutboxRepository outbox, Clock clock) {
         this.repository = repository;
         this.numberAllocator = numberAllocator;
         this.policyRepository = policyRepository;
+        this.productCatalog = productCatalog;
         this.outbox = outbox;
         this.clock = clock;
     }
@@ -89,7 +97,8 @@ public class UnderwritingSubmissionService {
     }
 
     /**
-     * Creates a RECEIVED submission. Validation runs before the number is
+     * Creates a RECEIVED submission. The product code must exist for the tenant
+     * and be ACTIVE. Validation and the catalog check run before the number is
      * allocated, so a rejected body never consumes a number. The number
      * allocation is its own short transaction; a later rollback of the insert
      * leaves a gap, matching database sequence semantics.
@@ -99,6 +108,7 @@ public class UnderwritingSubmissionService {
                                              CreateUnderwritingSubmissionRequest request) {
         UnderwritingSubmissionRules.UnderwritingSubmissionSpec spec =
                 UnderwritingSubmissionRules.validateCreate(request);
+        productCatalog.requireActive(tenantId, spec.productCode());
         Instant now = Instant.now(clock).truncatedTo(ChronoUnit.MICROS);
         String submissionNumber = formatNumber(allocateNumber(tenantId), now);
         UnderwritingSubmission submission = new UnderwritingSubmission(

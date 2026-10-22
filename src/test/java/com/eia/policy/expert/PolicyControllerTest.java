@@ -14,6 +14,7 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -21,6 +22,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -54,6 +56,9 @@ class PolicyControllerTest {
 
     @MockitoBean
     private PolicyVersionService versionService;
+
+    @MockitoBean
+    private ProductCatalogGuard productCatalog;
 
     @MockitoBean
     private OutboxRepository outbox;
@@ -264,6 +269,30 @@ class PolicyControllerTest {
                 .andExpect(jsonPath("$.category").value("CONFLICT"));
 
         verify(repository, never()).updateStatus(any(), any(), any(), any(), anyInt());
+    }
+
+    @Test
+    void exposesAnUnknownProductAsA422Problem() throws Exception {
+        ApiException rejected = PolicyErrors.businessRule("UNKNOWN_PRODUCT", "productCode",
+                "Product code NOPE does not exist in this tenant's product catalog.",
+                Map.of("productCode", "NOPE", "tenantId", TENANT.toString()));
+        doThrow(rejected).when(productCatalog).requireActive(TENANT, "NOPE");
+
+        CreatePolicyRequest request = new CreatePolicyRequest(TENANT, null, "NOPE", PARTY, null,
+                EFFECTIVE, EXPIRATION, BigDecimal.TEN, "USD", BigDecimal.TEN, "USD");
+
+        mvc.perform(post("/internal/v1/policies")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.code").value("UNKNOWN_PRODUCT"))
+                .andExpect(jsonPath("$.category").value("BUSINESS_RULE"))
+                .andExpect(jsonPath("$.errors[0].field").value("productCode"))
+                .andExpect(jsonPath("$.errors[0].code").value("UNKNOWN_PRODUCT"))
+                .andExpect(jsonPath("$.meta.productCode").value("NOPE"));
+
+        verify(repository, never()).create(any(CreatePolicyRequest.class), any(UUID.class));
     }
 
     @Test
