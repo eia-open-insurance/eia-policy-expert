@@ -57,11 +57,14 @@ class UnderwritingSubmissionServiceTest {
     private ProductCatalogGuard productCatalog;
 
     @Mock
+    private SubmissionReferralRepository referralRepository;
+
+    @Mock
     private OutboxRepository outbox;
 
     private UnderwritingSubmissionService service() {
         return new UnderwritingSubmissionService(repository, numberAllocator, policyRepository,
-                productCatalog, outbox, Clock.fixed(NOW, ZoneOffset.UTC));
+                productCatalog, referralRepository, outbox, Clock.fixed(NOW, ZoneOffset.UTC));
     }
 
     @Test
@@ -427,6 +430,21 @@ class UnderwritingSubmissionServiceTest {
         assertThat(spec.getValue().reason()).isEqualTo("Aggregate limit above authority");
         assertThat(spec.getValue().notes()).isEqualTo("Needs reinsurance sign-off");
 
+        ArgumentCaptor<SubmissionReferral> history =
+                ArgumentCaptor.forClass(SubmissionReferral.class);
+        verify(referralRepository).insert(history.capture());
+        assertThat(history.getValue().tenantId()).isEqualTo(TENANT);
+        assertThat(history.getValue().submissionId()).isEqualTo(SUBMISSION_ID);
+        assertThat(history.getValue().reason()).isEqualTo("Aggregate limit above authority");
+        assertThat(history.getValue().authority())
+                .isEqualTo("Chief Underwriting Officer");
+        assertThat(history.getValue().referredTo()).isEqualTo("Senior UW - Casualty");
+        assertThat(history.getValue().notes()).isEqualTo("Needs reinsurance sign-off");
+        assertThat(history.getValue().decision()).isEqualTo("PENDING");
+        assertThat(history.getValue().decidedBy()).isNull();
+        assertThat(history.getValue().decidedAt()).isNull();
+        assertThat(history.getValue().createdAt()).isEqualTo(NOW);
+
         OutboxEvent event = onlyEvent();
         assertThat(event.eventType()).isEqualTo("policy.submission.referred");
         assertThat(event.aggregateType()).isEqualTo("UnderwritingSubmission");
@@ -486,6 +504,7 @@ class UnderwritingSubmissionServiceTest {
 
         verify(repository, never()).updateReferral(any(), any(), anyString(), anyInt(),
                 any(), any());
+        verifyNoInteractions(referralRepository);
         verifyNoInteractions(outbox);
     }
 
@@ -538,6 +557,9 @@ class UnderwritingSubmissionServiceTest {
         when(repository.decideReferral(eq(TENANT), eq(SUBMISSION_ID), eq("REFERRED"),
                 eq("APPROVED"), eq("Chief Underwriter"), eq("Approved within authority"),
                 eq("REFERRED"), eq(1), any(Instant.class))).thenReturn(1);
+        when(referralRepository.decideLatestPending(eq(TENANT), eq(SUBMISSION_ID),
+                eq("APPROVED"), eq("Chief Underwriter"), eq("Approved within authority"),
+                any(Instant.class))).thenReturn(1);
 
         UnderwritingSubmissionView view = service().decideReferral(TENANT, SUBMISSION_ID,
                 new DecideReferralRequest(" approved ", "  Chief Underwriter  ",
@@ -548,6 +570,10 @@ class UnderwritingSubmissionServiceTest {
         assertThat(view.referralDecidedBy()).isEqualTo("Chief Underwriter");
         assertThat(view.referralDecidedAt()).isEqualTo(NOW);
         assertThat(view.version()).isEqualTo(2);
+
+        verify(referralRepository).decideLatestPending(eq(TENANT), eq(SUBMISSION_ID),
+                eq("APPROVED"), eq("Chief Underwriter"), eq("Approved within authority"),
+                any(Instant.class));
 
         OutboxEvent event = onlyEvent();
         assertThat(event.eventType()).isEqualTo("policy.submission.referral-decided");
@@ -565,6 +591,29 @@ class UnderwritingSubmissionServiceTest {
     }
 
     @Test
+    void aDecisionWithoutAPendingHistoryRowIsAnInternalErrorWithoutAnEvent() {
+        when(repository.findById(TENANT, SUBMISSION_ID))
+                .thenReturn(Optional.of(referralSubmission("REFERRED", "PENDING", null, null, 1)));
+        when(repository.decideReferral(eq(TENANT), eq(SUBMISSION_ID), eq("REFERRED"),
+                eq("APPROVED"), eq("Underwriter"), isNull(), eq("REFERRED"), eq(1),
+                any(Instant.class))).thenReturn(1);
+        when(referralRepository.decideLatestPending(eq(TENANT), eq(SUBMISSION_ID),
+                eq("APPROVED"), eq("Underwriter"), isNull(), any(Instant.class)))
+                .thenReturn(0);
+
+        assertThatThrownBy(() -> service().decideReferral(TENANT, SUBMISSION_ID,
+                new DecideReferralRequest("APPROVED", "Underwriter", null)))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException api = (ApiException) ex;
+                    assertThat(api.status()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+                    assertThat(api.code()).isEqualTo("REFERRAL_HISTORY_INCONSISTENT");
+                });
+
+        verifyNoInteractions(outbox);
+    }
+
+    @Test
     void decliningAPendingReferralAlsoDeclinesTheSubmission() {
         when(repository.findById(TENANT, SUBMISSION_ID))
                 .thenReturn(Optional.of(referralSubmission("REFERRED", "PENDING", null, null, 1)))
@@ -572,6 +621,9 @@ class UnderwritingSubmissionServiceTest {
                         "Chief Underwriter", NOW, 2)));
         when(repository.decideReferral(eq(TENANT), eq(SUBMISSION_ID), eq("DECLINED"),
                 eq("DECLINED"), eq("Chief Underwriter"), isNull(), eq("REFERRED"), eq(1),
+                any(Instant.class))).thenReturn(1);
+        when(referralRepository.decideLatestPending(eq(TENANT), eq(SUBMISSION_ID),
+                eq("DECLINED"), eq("Chief Underwriter"), isNull(),
                 any(Instant.class))).thenReturn(1);
 
         UnderwritingSubmissionView view = service().decideReferral(TENANT, SUBMISSION_ID,

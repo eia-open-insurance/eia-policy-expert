@@ -54,10 +54,13 @@ class SubmissionReferralIntegrationTest extends ProductCatalogTestSupport {
     @Autowired
     private JdbcTemplate jdbc;
 
+    @Autowired
+    private SubmissionReferralBackfillRunner backfillRunner;
+
     @BeforeEach
     void clean() {
-        for (String table : List.of("outbox_event", "underwriting_submission",
-                "underwriting_submission_number_seq")) {
+        for (String table : List.of("outbox_event", "underwriting_submission_referral",
+                "underwriting_submission", "underwriting_submission_number_seq")) {
             jdbc.update("DELETE FROM " + table);
         }
     }
@@ -466,6 +469,174 @@ class SubmissionReferralIntegrationTest extends ProductCatalogTestSupport {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"))
                 .andExpect(jsonPath("$.errors[*].field", hasItems("decision", "decidedBy")));
+    }
+
+    @Test
+    void recordsEveryReferralRoundAndDecidesTheLatestPendingRow() throws Exception {
+        UUID submissionId = UUID.fromString(createSubmission(TENANT)
+                .get("submissionId").asText());
+
+        refer(submissionId, TENANT, """
+                {"reason":"First review","authority":"CUO","referredTo":"Senior UW",
+                 "notes":"First round notes"}
+                """).andExpect(status().isOk());
+        // The history order is created_at-based; keep the two rounds distinct on
+        // every clock resolution so "newest first" is unambiguous.
+        Thread.sleep(5);
+        refer(submissionId, TENANT, """
+                {"reason":"Second review","authority":"CUO",
+                 "referredTo":"Reinsurance desk","notes":"Second round notes"}
+                """).andExpect(status().isOk())
+                .andExpect(jsonPath("$.referralReason").value("Second review"))
+                .andExpect(jsonPath("$.version").value(2));
+
+        mvc.perform(get("/api/v1/policies/submissions/{id}/referrals", submissionId)
+                        .param("tenantId", TENANT.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$", hasSize(2)))
+                .andExpect(jsonPath("$[0].reason").value("Second review"))
+                .andExpect(jsonPath("$[0].referredTo").value("Reinsurance desk"))
+                .andExpect(jsonPath("$[0].notes").value("Second round notes"))
+                .andExpect(jsonPath("$[0].decision").value("PENDING"))
+                .andExpect(jsonPath("$[0].submissionId").value(submissionId.toString()))
+                .andExpect(jsonPath("$[0].tenantId").doesNotExist())
+                .andExpect(jsonPath("$[1].reason").value("First review"))
+                .andExpect(jsonPath("$[1].referredTo").value("Senior UW"))
+                .andExpect(jsonPath("$[1].decision").value("PENDING"));
+
+        assertThat(countHistory(submissionId)).isEqualTo(2);
+
+        // Only the newest PENDING row is decided; the earlier round keeps its
+        // own narrative and pending state.
+        decide(submissionId, TENANT, """
+                {"decision":"APPROVED","decidedBy":"Chief Underwriter",
+                 "notes":"Approved after review"}
+                """)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.referralDecision").value("APPROVED"));
+
+        mvc.perform(get("/api/v1/policies/submissions/{id}/referrals", submissionId)
+                        .param("tenantId", TENANT.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$", hasSize(2)))
+                .andExpect(jsonPath("$[0].reason").value("Second review"))
+                .andExpect(jsonPath("$[0].decision").value("APPROVED"))
+                .andExpect(jsonPath("$[0].decidedBy").value("Chief Underwriter"))
+                .andExpect(jsonPath("$[0].decidedAt").isNotEmpty())
+                .andExpect(jsonPath("$[0].notes").value("Approved after review"))
+                .andExpect(jsonPath("$[1].reason").value("First review"))
+                .andExpect(jsonPath("$[1].decision").value("PENDING"))
+                .andExpect(jsonPath("$[1].decidedBy").isEmpty())
+                .andExpect(jsonPath("$[1].notes").value("First round notes"));
+
+        List<Map<String, Object>> rows = jdbc.queryForList("""
+                SELECT decision, decided_by
+                  FROM underwriting_submission_referral
+                 WHERE submission_id = ?
+                 ORDER BY created_at DESC, id DESC
+                """, submissionId);
+        assertThat(rows).hasSize(2);
+        assertThat(rows.get(0).get("decision")).isEqualTo("APPROVED");
+        assertThat(rows.get(0).get("decided_by")).isEqualTo("Chief Underwriter");
+        assertThat(rows.get(1).get("decision")).isEqualTo("PENDING");
+
+        // The submission columns remain the latest round's projection.
+        mvc.perform(get("/api/v1/policies/submissions/{id}", submissionId)
+                        .param("tenantId", TENANT.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.referralReason").value("Second review"))
+                .andExpect(jsonPath("$.referralDecision").value("APPROVED"));
+        assertThat(countEvents("policy.submission.referred")).isEqualTo(2);
+        assertThat(countEvents("policy.submission.referral-decided")).isEqualTo(1);
+    }
+
+    @Test
+    void enforcesTheTenantWallOnReferralHistory() throws Exception {
+        UUID submissionId = UUID.fromString(createSubmission(TENANT)
+                .get("submissionId").asText());
+        refer(submissionId, TENANT, """
+                {"reason":"Tenant A review","authority":"CUO","referredTo":"Senior UW"}
+                """).andExpect(status().isOk());
+
+        UUID otherSubmissionId = UUID.fromString(createSubmission(OTHER_TENANT)
+                .get("submissionId").asText());
+        refer(otherSubmissionId, OTHER_TENANT, """
+                {"reason":"Tenant B review","authority":"Other CUO",
+                 "referredTo":"Other Senior UW"}
+                """).andExpect(status().isOk());
+
+        mvc.perform(get("/api/v1/policies/submissions/{id}/referrals", submissionId)
+                        .param("tenantId", OTHER_TENANT.toString()))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value("SUBMISSION_NOT_FOUND"));
+
+        mvc.perform(get("/api/v1/policies/submissions/{id}/referrals", submissionId)
+                        .param("tenantId", TENANT.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$", hasSize(1)))
+                .andExpect(jsonPath("$[0].reason").value("Tenant A review"));
+
+        mvc.perform(get("/api/v1/policies/submissions/{id}/referrals", otherSubmissionId)
+                        .param("tenantId", OTHER_TENANT.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$", hasSize(1)))
+                .andExpect(jsonPath("$[0].reason").value("Tenant B review"));
+    }
+
+    @Test
+    void backfillsALegacyCurrentReferralIntoHistoryIdempotently() throws Exception {
+        UUID submissionId = UUID.fromString(createSubmission(TENANT)
+                .get("submissionId").asText());
+
+        // No referral yet: there is nothing to seed.
+        assertThat(backfillRunner.backfill()).isZero();
+        mvc.perform(get("/api/v1/policies/submissions/{id}/referrals", submissionId)
+                        .param("tenantId", TENANT.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$", hasSize(0)));
+
+        refer(submissionId, TENANT, """
+                {"reason":"Aggregate limit above authority",
+                 "authority":"Chief Underwriting Officer",
+                 "referredTo":"Senior UW - Casualty",
+                 "notes":"Needs reinsurance sign-off"}
+                """).andExpect(status().isOk());
+        decide(submissionId, TENANT, """
+                {"decision":"DECLINED","decidedBy":"Chief Underwriter",
+                 "notes":"Declined at desk"}
+                """).andExpect(status().isOk());
+
+        // Simulate a database upgraded from the pre-history schema: the
+        // submission still carries the decided current referral, but no round
+        // was written to the history table.
+        jdbc.update("DELETE FROM underwriting_submission_referral WHERE submission_id = ?",
+                submissionId);
+        assertThat(backfillRunner.backfill()).isEqualTo(1);
+        assertThat(backfillRunner.backfill()).isZero();
+        assertThat(countHistory(submissionId)).isEqualTo(1);
+
+        mvc.perform(get("/api/v1/policies/submissions/{id}/referrals", submissionId)
+                        .param("tenantId", TENANT.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$", hasSize(1)))
+                .andExpect(jsonPath("$[0].submissionId").value(submissionId.toString()))
+                .andExpect(jsonPath("$[0].reason")
+                        .value("Aggregate limit above authority"))
+                .andExpect(jsonPath("$[0].authority")
+                        .value("Chief Underwriting Officer"))
+                .andExpect(jsonPath("$[0].referredTo").value("Senior UW - Casualty"))
+                .andExpect(jsonPath("$[0].notes").value("Declined at desk"))
+                .andExpect(jsonPath("$[0].decision").value("DECLINED"))
+                .andExpect(jsonPath("$[0].decidedBy").value("Chief Underwriter"))
+                .andExpect(jsonPath("$[0].decidedAt").isNotEmpty())
+                .andExpect(jsonPath("$[0].createdAt").isNotEmpty());
+    }
+
+    private int countHistory(UUID submissionId) {
+        return jdbc.queryForObject("""
+                SELECT count(*) FROM underwriting_submission_referral
+                 WHERE submission_id = ?
+                """, Integer.class, submissionId);
     }
 
     private JsonNode createSubmission(UUID tenantId) throws Exception {

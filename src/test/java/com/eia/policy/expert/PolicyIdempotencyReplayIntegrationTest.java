@@ -66,7 +66,8 @@ class PolicyIdempotencyReplayIntegrationTest extends ProductCatalogTestSupport {
     void clean() {
         for (String table : List.of("outbox_event", "policy_rating_worksheet",
                 "policy_limit_state", "policy_limit", "policy_coverage", "policy_version",
-                "policy", "underwriting_submission", "underwriting_submission_number_seq",
+                "policy", "underwriting_submission_referral", "underwriting_submission",
+                "underwriting_submission_number_seq",
                 "policy_command_idempotency", "policy_idempotency")) {
             jdbc.update("DELETE FROM " + table);
         }

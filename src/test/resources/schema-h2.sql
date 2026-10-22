@@ -831,6 +831,31 @@ ALTER TABLE underwriting_submission
 CREATE INDEX IF NOT EXISTS idx_underwriting_submission_tenant_referral
     ON underwriting_submission (tenant_id, referral_decision, updated_at DESC, id);
 
+-- H2-compatible copy of the referral history. One row per refer command; a
+-- decision updates the newest PENDING row. The child rows are deleted with
+-- their submission. H2 spells TIMESTAMPTZ as TIMESTAMP WITH TIME ZONE.
+CREATE TABLE IF NOT EXISTS underwriting_submission_referral (
+    id UUID PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    submission_id UUID NOT NULL,
+    reason VARCHAR(64),
+    authority VARCHAR(64),
+    referred_to VARCHAR(128),
+    notes VARCHAR(2000),
+    decision VARCHAR(32) NOT NULL,
+    decided_by VARCHAR(128),
+    decided_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    CONSTRAINT fk_underwriting_submission_referral_submission
+        FOREIGN KEY (submission_id) REFERENCES underwriting_submission (id)
+        ON DELETE CASCADE,
+    CONSTRAINT ck_underwriting_submission_referral_history_decision
+        CHECK (decision IN ('PENDING', 'APPROVED', 'DECLINED'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_underwriting_submission_referral_submission_created
+    ON underwriting_submission_referral (submission_id, created_at DESC, id);
+
 -- H2-compatible copy of the submission-to-policy link. H2 accepts the same
 -- idempotent ADD COLUMN/DROP CONSTRAINT/ADD CONSTRAINT forms, and UNIQUE
 -- treats nulls as distinct so only a converted policy claims a submission.

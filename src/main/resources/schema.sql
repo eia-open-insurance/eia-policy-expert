@@ -949,6 +949,36 @@ ALTER TABLE underwriting_submission
 CREATE INDEX IF NOT EXISTS idx_underwriting_submission_tenant_referral
     ON underwriting_submission (tenant_id, referral_decision, updated_at DESC, id);
 
+-- Referral history (SPEC 11.2.14). The submission row keeps the latest
+-- referral in its referral_* columns, while every refer command appends one
+-- round here; a decision updates the newest PENDING row instead of replacing
+-- it. The child rows follow the submission on delete. A submission that
+-- predates this table is backfilled once at startup
+-- (SubmissionReferralBackfillRunner) from its current referral columns.
+CREATE TABLE IF NOT EXISTS underwriting_submission_referral (
+    id UUID PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    submission_id UUID NOT NULL,
+    reason VARCHAR(64),
+    authority VARCHAR(64),
+    referred_to VARCHAR(128),
+    notes VARCHAR(2000),
+    decision VARCHAR(32) NOT NULL,
+    decided_by VARCHAR(128),
+    decided_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL,
+    CONSTRAINT fk_underwriting_submission_referral_submission
+        FOREIGN KEY (submission_id) REFERENCES underwriting_submission (id)
+        ON DELETE CASCADE,
+    CONSTRAINT ck_underwriting_submission_referral_history_decision
+        CHECK (decision IN ('PENDING', 'APPROVED', 'DECLINED'))
+);
+
+-- Newest-first per-submission history read; the id tie-breaker keeps the order
+-- stable when two rounds share a timestamp.
+CREATE INDEX IF NOT EXISTS idx_underwriting_submission_referral_submission_created
+    ON underwriting_submission_referral (submission_id, created_at DESC, id);
+
 -- Submission-to-policy conversion (SPEC 11.2.14). A converted policy records
 -- the submission it came from. The column is nullable so every pre-conversion
 -- policy keeps working and the ALTER is idempotent for already-migrated

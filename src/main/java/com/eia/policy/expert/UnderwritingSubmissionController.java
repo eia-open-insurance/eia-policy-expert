@@ -66,6 +66,22 @@ public class UnderwritingSubmissionController {
         return service.get(RequestScope.tenant(tenantId, tenantHeader), id);
     }
 
+    /**
+     * The submission's referral history, newest first. Each round keeps the
+     * details captured when it was referred plus the decision once one is
+     * recorded, so a review that went through several rounds is reconstructable.
+     */
+    @GetMapping("/{id}/referrals")
+    public List<SubmissionReferralView> referrals(
+            @PathVariable UUID id,
+            @RequestParam(value = "tenantId", required = false) UUID tenantId,
+            @RequestHeader(value = RequestScope.TENANT_HEADER, required = false)
+            String tenantHeader,
+            @RequestHeader(value = RequestScope.BOOK_HEADER, required = false) String book) {
+        RequestScope.requireDirectBook(book);
+        return service.listReferrals(RequestScope.tenant(tenantId, tenantHeader), id);
+    }
+
     @PostMapping
     public ResponseEntity<UnderwritingSubmissionView> create(
             @RequestParam(value = "tenantId", required = false) UUID tenantId,

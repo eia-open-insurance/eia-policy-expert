@@ -255,6 +255,34 @@ class SchemaContractTest {
     }
 
     @Test
+    void schemaStoresRepeatableReferralHistoryWithADecisionCheckAndLookupIndex()
+            throws Exception {
+        String schema = schema();
+
+        assertThat(schema).contains(
+                "CREATE TABLE IF NOT EXISTS underwriting_submission_referral");
+        assertThat(schema).contains("submission_id UUID NOT NULL");
+        assertThat(schema).contains("reason VARCHAR(64)");
+        assertThat(schema).contains("authority VARCHAR(64)");
+        assertThat(schema).contains("referred_to VARCHAR(128)");
+        assertThat(schema).contains("notes VARCHAR(2000)");
+        assertThat(schema).contains("decision VARCHAR(32) NOT NULL");
+        assertThat(schema).contains("decided_by VARCHAR(128)");
+        assertThat(schema).contains("decided_at TIMESTAMPTZ");
+        assertThat(schema).contains("created_at TIMESTAMPTZ NOT NULL");
+        assertThat(schema).contains(
+                "CONSTRAINT ck_underwriting_submission_referral_history_decision\n"
+                        + "        CHECK (decision IN ('PENDING', 'APPROVED', 'DECLINED'))");
+        assertThat(schema).contains(
+                "FOREIGN KEY (submission_id) REFERENCES underwriting_submission (id)");
+        assertThat(schema).contains(
+                "CREATE INDEX IF NOT EXISTS "
+                        + "idx_underwriting_submission_referral_submission_created");
+        assertThat(schema).contains(
+                "ON underwriting_submission_referral (submission_id, created_at DESC, id)");
+    }
+
+    @Test
     void schemaIndexesTheTenantWideReceivableScan() throws Exception {
         String schema = schema();
 

@@ -39,6 +39,10 @@ class UnderwritingSubmissionControllerTest {
             UUID.fromString("44444444-4444-7444-8444-444444444444");
     private static final UUID POLICY_ID =
             UUID.fromString("55555555-5555-7555-8555-555555555555");
+    private static final UUID REFERRAL_ONE_ID =
+            UUID.fromString("66666666-6666-7666-8666-666666666666");
+    private static final UUID REFERRAL_TWO_ID =
+            UUID.fromString("77777777-7777-7777-8777-777777777777");
     private static final LocalDate EFFECTIVE = LocalDate.of(2026, 11, 1);
     private static final Instant CREATED = Instant.parse("2026-10-22T12:00:00Z");
     private static final String CREATE_BODY = """
@@ -545,6 +549,34 @@ class UnderwritingSubmissionControllerTest {
                                 """))
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.code").value("REFERRAL_NOT_PENDING"));
+    }
+
+    @Test
+    void listsReferralHistoryNewestFirstWithoutLeakingTheTenant() throws Exception {
+        when(service.listReferrals(TENANT, SUBMISSION_ID)).thenReturn(List.of(
+                new SubmissionReferralView(REFERRAL_TWO_ID, SUBMISSION_ID,
+                        "Second review", "CUO", "Reinsurance desk", "Referred again",
+                        "PENDING", null, null, CREATED.plusSeconds(60)),
+                new SubmissionReferralView(REFERRAL_ONE_ID, SUBMISSION_ID,
+                        "First review", "Chief Underwriting Officer",
+                        "Senior UW - Casualty", "Needs sign-off", "APPROVED",
+                        "Chief Underwriter", CREATED, CREATED)));
+
+        mvc.perform(get("/api/v1/policies/submissions/{id}/referrals", SUBMISSION_ID)
+                        .param("tenantId", TENANT.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$", hasSize(2)))
+                .andExpect(jsonPath("$[0].referralId").value(REFERRAL_TWO_ID.toString()))
+                .andExpect(jsonPath("$[0].submissionId").value(SUBMISSION_ID.toString()))
+                .andExpect(jsonPath("$[0].decision").value("PENDING"))
+                .andExpect(jsonPath("$[0].createdAt").value("2026-10-22T12:01:00Z"))
+                .andExpect(jsonPath("$[0].tenantId").doesNotExist())
+                .andExpect(jsonPath("$[1].referralId").value(REFERRAL_ONE_ID.toString()))
+                .andExpect(jsonPath("$[1].decision").value("APPROVED"))
+                .andExpect(jsonPath("$[1].decidedBy").value("Chief Underwriter"))
+                .andExpect(jsonPath("$[1].decidedAt").value("2026-10-22T12:00:00Z"));
+
+        verify(service).listReferrals(TENANT, SUBMISSION_ID);
     }
 
     private static UnderwritingSubmissionView referralView(String status, String decision,

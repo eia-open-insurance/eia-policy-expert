@@ -56,7 +56,8 @@ class SubmissionConversionIntegrationTest extends ProductCatalogTestSupport {
     @BeforeEach
     void clean() {
         for (String table : List.of("outbox_event", "policy_limit_state", "policy_limit",
-                "policy_coverage", "policy_version", "policy", "underwriting_submission",
+                "policy_coverage", "policy_version", "policy",
+                "underwriting_submission_referral", "underwriting_submission",
                 "underwriting_submission_number_seq")) {
             jdbc.update("DELETE FROM " + table);
         }

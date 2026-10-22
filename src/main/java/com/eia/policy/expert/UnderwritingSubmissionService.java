@@ -47,6 +47,12 @@ import java.util.UUID;
  * {@code policy.submission.referred} or
  * {@code policy.submission.referral-decided} in the same transaction as the
  * row change.</p>
+ *
+ * <p>The current referral columns are a projection of the latest round; every
+ * accepted refer command also appends a new round to the referral history, and
+ * a decision updates the newest {@code PENDING} round. The history is read with
+ * {@code GET /api/v1/policies/submissions/{id}/referrals}, newest first, so a
+ * review that goes through several rounds can still be reconstructed.</p>
  */
 @Service
 public class UnderwritingSubmissionService {
@@ -56,6 +62,7 @@ public class UnderwritingSubmissionService {
     private final UnderwritingSubmissionNumberAllocator numberAllocator;
     private final PolicyRepository policyRepository;
     private final ProductCatalogGuard productCatalog;
+    private final SubmissionReferralRepository referralRepository;
     private final OutboxRepository outbox;
     private final Clock clock;
 
@@ -64,20 +71,23 @@ public class UnderwritingSubmissionService {
                                          UnderwritingSubmissionNumberAllocator numberAllocator,
                                          PolicyRepository policyRepository,
                                          ProductCatalogGuard productCatalog,
+                                         SubmissionReferralRepository referralRepository,
                                          OutboxRepository outbox) {
-        this(repository, numberAllocator, policyRepository, productCatalog, outbox,
-                Clock.systemUTC());
+        this(repository, numberAllocator, policyRepository, productCatalog, referralRepository,
+                outbox, Clock.systemUTC());
     }
 
     UnderwritingSubmissionService(UnderwritingSubmissionRepository repository,
                                   UnderwritingSubmissionNumberAllocator numberAllocator,
                                   PolicyRepository policyRepository,
                                   ProductCatalogGuard productCatalog,
+                                  SubmissionReferralRepository referralRepository,
                                   OutboxRepository outbox, Clock clock) {
         this.repository = repository;
         this.numberAllocator = numberAllocator;
         this.policyRepository = policyRepository;
         this.productCatalog = productCatalog;
+        this.referralRepository = referralRepository;
         this.outbox = outbox;
         this.clock = clock;
     }
@@ -204,6 +214,18 @@ public class UnderwritingSubmissionService {
             UnderwritingSubmission latest = requireSubmission(tenantId, submissionId);
             throw conflict(latest.version(), current.version());
         }
+        referralRepository.insert(new SubmissionReferral(
+                UUID.randomUUID(),
+                tenantId,
+                submissionId,
+                referral.reason(),
+                referral.authority(),
+                referral.referredTo(),
+                referral.notes(),
+                UnderwritingSubmissionRules.REFERRAL_PENDING,
+                null,
+                null,
+                now));
         UnderwritingSubmission updated = requireSubmission(tenantId, submissionId);
         outbox.insert(OutboxEvent.fromEnvelope(
                 PolicyEvents.submissionReferred(current, updated, now)));
@@ -239,10 +261,30 @@ public class UnderwritingSubmissionService {
             UnderwritingSubmission latest = requireSubmission(tenantId, submissionId);
             throw conflict(latest.version(), current.version());
         }
+        int historyRows = referralRepository.decideLatestPending(tenantId, submissionId,
+                decision.decision(), decision.decidedBy(), decision.notes(), now);
+        if (historyRows == 0) {
+            throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,
+                    "REFERRAL_HISTORY_INCONSISTENT",
+                    "Submission " + submissionId + " has a pending referral without a "
+                            + "PENDING history row; the decision was not recorded.");
+        }
         UnderwritingSubmission updated = requireSubmission(tenantId, submissionId);
         outbox.insert(OutboxEvent.fromEnvelope(
                 PolicyEvents.submissionReferralDecided(current, updated, now)));
         return UnderwritingSubmissionView.of(updated);
+    }
+
+    /**
+     * The submission's referral history, newest first. The parent submission is
+     * resolved first so a missing or another tenant's id is a canonical 404
+     * even when it has no history rows.
+     */
+    public List<SubmissionReferralView> listReferrals(UUID tenantId, UUID submissionId) {
+        requireSubmission(tenantId, submissionId);
+        return referralRepository.findAllNewestFirst(tenantId, submissionId).stream()
+                .map(SubmissionReferralView::of)
+                .toList();
     }
 
     private UnderwritingSubmission requireSubmission(UUID tenantId, UUID submissionId) {

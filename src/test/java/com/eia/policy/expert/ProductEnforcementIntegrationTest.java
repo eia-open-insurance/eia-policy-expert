@@ -56,8 +56,8 @@ class ProductEnforcementIntegrationTest extends ProductCatalogTestSupport {
         for (String table : List.of(
                 "outbox_event", "policy_limit_erosion", "policy_limit_state", "policy_limit",
                 "policy_coverage", "policy_version", "policy_command_idempotency",
-                "policy_idempotency", "policy", "underwriting_submission",
-                "underwriting_submission_number_seq")) {
+                "policy_idempotency", "policy", "underwriting_submission_referral",
+                "underwriting_submission", "underwriting_submission_number_seq")) {
             jdbc.update("DELETE FROM " + table);
         }
     }

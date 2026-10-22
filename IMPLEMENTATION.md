@@ -56,6 +56,7 @@ outbox (SPEC 7.5.1) in the same database transaction as the aggregate write.
 | `ProductCatalogGuard` | ACTIVE-product check shared by policy and submission create; 422 `UNKNOWN_PRODUCT`/`PRODUCT_NOT_ACTIVE` with `productCode` and `meta` |
 | `ProductSeeder` / `ProductSeedRunner` | Idempotent demo-tenant product seed and its conditional startup hook |
 | `UnderwritingSubmissionController` / `UnderwritingSubmissionService` / `UnderwritingSubmissionRepository` / `UnderwritingSubmissionNumberAllocator` | Tenant-numbered underwriting submissions, q/status reads, the one-way status graph, and the submission outbox events |
+| `SubmissionReferralRepository` / `SubmissionReferralBackfillRunner` | Append-only referral rounds, the newest-PENDING decision update, the newest-first history read, and the idempotent startup backfill of a legacy current referral |
 | `SubmissionConversionService` / `ConvertSubmissionRequest` / `SubmissionConversionResult` | Quoted/bound submission conversion into a DRAFT policy, the `policy.submission_id` link, derived base coverage/limit, and idempotent replay of the linked policy |
 | `PolicyRules`, `VersionTimeline`, `CoverageRules`, `CancellationRules`, `CancellationMath`, `PartyRules`, `EndorsementRules`, `BillingRules`, `CreditNoteRules`, `MassTortProfileRules`, `ProgramRules`, `LegalEntityRules`, `RatingRules`, `UnderwritingSubmissionRules` | Pure invariants with focused unit tests |
 | `PolicyVersionHasher`, `VersionIssuer` | Canonical version snapshot hash and issuance |
@@ -499,6 +500,37 @@ The submission projection exposes `referralReason`, `referralAuthority`,
 `DECLINED`, the submission is terminal for the lifecycle, and a generic status
 transition from `REFERRED` remains governed by the existing graph.
 
+### Referral history
+
+The current referral columns are the latest projection, not the whole review
+record. Every accepted refer command also appends one row to
+`underwriting_submission_referral` (`id UUID`, `tenant_id`, `submission_id`,
+`reason`, `authority`, `referred_to`, `notes`, `decision`, `decided_by`,
+`decided_at`, `created_at`) with `decision=PENDING`, in the same transaction as
+the submission update. A decision updates the newest `PENDING` round (the
+`ORDER BY created_at DESC, id DESC` row) with the decision, decider, instant,
+and, when supplied, the decision notes; earlier rounds keep their own values.
+The history table has a `PENDING`/`APPROVED`/`DECLINED` check, a cascading
+foreign key to the submission, and
+`idx_underwriting_submission_referral_submission_created` on
+`(submission_id, created_at DESC, id)` for the newest-first read. Referral rows
+are tenant-owned and every read is tenant-scoped.
+
+`GET /api/v1/policies/submissions/{id}/referrals` (also the `/internal/v1`
+alias) returns the rounds newest first, each as
+`{referralId, submissionId, reason, authority, referredTo, notes, decision,
+decidedBy, decidedAt, createdAt}`; the tenant column is never exposed. A missing
+or another tenant's submission is `404 SUBMISSION_NOT_FOUND`; a submission with
+no referral returns `[]`.
+
+The submission row remains the source of truth for a database upgraded from the
+pre-history schema. `SubmissionReferralBackfillRunner` runs after startup and
+seeds one history row from the current `referral_*` columns for every submission
+that has a current referral and no history rows, using `updated_at` as the
+best available round timestamp. The `NOT EXISTS` guard skips submissions that
+already have history, so repeated starts (and the second call in the backfill
+test) insert nothing.
+
 ## Submission-to-policy conversion
 
 `POST /api/v1/policies/submissions/{id}/convert` (also the `/internal/v1` alias)
@@ -624,17 +656,20 @@ The live smoke is opt-in and requires PostgreSQL.
   IDEMPOTENCY_CONFLICT` with `meta.operation` and `meta.key`. The hash includes
   the policy id, so a key cannot replay a worksheet from another policy.
   Without a key each accepted command appends a worksheet.
-- Underwriting submissions are an intake and conversion record only. The SPEC
-  11.2.14 `clearance`, `referral`, `underwriting_authority`, `declination`,
-  `policy_quote`, product/form library, eligibility rules, and
-  exposure/coverage detail are not exposed, and conversion writes one base
-  coverage rather than the submission's requested coverage schedule. The status
-  vocabulary is the requested slice graph; the SPEC `CLEARANCE` and `RATING`
-  intermediate states are not modelled. There is no submission edit or delete
-  command, no status history table (the reason lives on the event), and no
-  `If-Match` on the submission commands. Conversion accepts `Idempotency-Key`,
-  stores the SHA-256 of the canonical conversion request (premium, currency,
-  expiration, and submission id), and replays the stored policy response only
-  for the same request; a changed request under the same key is `409
-  IDEMPOTENCY_CONFLICT` with `meta.operation` and `meta.key`. Without a key it
-  is idempotent by the linked policy.
+- Underwriting submissions are an intake and conversion record only. The
+  structured referral command and its history preserve review rounds, but the
+  SPEC 11.2.14 referral shape (closed reason enum, authority/assignee UUID
+  references, RETURNED decision, conditions, expiry) is not modelled. The
+  `clearance`, `underwriting_authority`, `declination`, `policy_quote`,
+  product/form library, eligibility rules, and exposure/coverage detail are not
+  exposed, and conversion writes one base coverage rather than the submission's
+  requested coverage schedule. The status vocabulary is the requested slice
+  graph; the SPEC `CLEARANCE` and `RATING` intermediate states are not modelled.
+  There is no submission edit or delete command, no status history table (the
+  reason lives on the event), and no `If-Match` on the submission commands.
+  Conversion accepts `Idempotency-Key`, stores the SHA-256 of the canonical
+  conversion request (premium, currency, expiration, and submission id), and
+  replays the stored policy response only for the same request; a changed
+  request under the same key is `409 IDEMPOTENCY_CONFLICT` with
+  `meta.operation` and `meta.key`. Without a key it is idempotent by the linked
+  policy.

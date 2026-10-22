@@ -68,8 +68,8 @@ class UnderwritingSubmissionIntegrationTest extends ProductCatalogTestSupport {
     @BeforeEach
     void clean() {
         transaction = new TransactionTemplate(transactionManager);
-        for (String table : List.of("outbox_event", "underwriting_submission",
-                "underwriting_submission_number_seq")) {
+        for (String table : List.of("outbox_event", "underwriting_submission_referral",
+                "underwriting_submission", "underwriting_submission_number_seq")) {
             jdbc.update("DELETE FROM " + table);
         }
     }
