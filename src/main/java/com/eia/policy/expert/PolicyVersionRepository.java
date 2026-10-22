@@ -149,7 +149,7 @@ public class PolicyVersionRepository {
                 tenantId, policyId, versionId);
     }
 
-    /** Marks the current ISSUED version SUPERSEDED and closes its window. */
+    /** Marks the current DRAFT or ISSUED version SUPERSEDED and closes its window. */
     public int supersede(UUID tenantId, UUID policyId, UUID versionId, LocalDate cutover) {
         return jdbc.update("""
                 UPDATE policy_version
@@ -159,7 +159,7 @@ public class PolicyVersionRepository {
                                THEN CAST(? AS DATE)
                            ELSE effective_to
                        END
-                 WHERE tenant_id = ? AND policy_id = ? AND id = ? AND status = 'ISSUED'
+                 WHERE tenant_id = ? AND policy_id = ? AND id = ? AND status IN ('DRAFT', 'ISSUED')
                 """, cutover, cutover, tenantId, policyId, versionId);
     }
 

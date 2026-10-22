@@ -35,7 +35,10 @@ public class VersionIssuer {
         UUID tenantId = policy.tenantId();
         UUID policyId = policy.id();
         int versionNumber = versionRepository.nextVersionNumber(tenantId, policyId);
-        PolicyVersion current = versionRepository.findIssued(tenantId, policyId).orElse(null);
+        PolicyVersion current = versionRepository.findLatest(tenantId, policyId)
+                .filter(version -> !"SUPERSEDED".equals(version.status())
+                        && !"VOIDED".equals(version.status()))
+                .orElse(null);
         Instant now = Instant.now();
         PolicyVersion candidate = new PolicyVersion(
                 versionId, tenantId, policyId, versionNumber,
