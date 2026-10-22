@@ -78,11 +78,11 @@ contract structures from SPEC 11.2:
   source policy.
 - `outbox_event`: canonical Policy events written in the same transaction as
   each covered mutation (`created`, `updated`, `version-issued`, `endorsed`,
-  `cancelled`, `reinstated`, `renewed`, `billing-plan.created`, `installment.paid`,
-  `installment.waived`, `dunning.sent`, `mass-tort-profile.updated`,
-  `credit-note.created`, `credit-note.issued`, `credit-note.applied`,
-  `credit-note.cancelled`, `credit-note.reversed`, `program.created`,
-  `policy.program-assigned`, `legal-entity.created`,
+  `premium-audited`, `cancelled`, `reinstated`, `renewed`, `billing-plan.created`,
+  `installment.paid`, `installment.waived`, `dunning.sent`,
+  `mass-tort-profile.updated`, `credit-note.created`, `credit-note.issued`,
+  `credit-note.applied`, `credit-note.cancelled`, `credit-note.reversed`,
+  `program.created`, `policy.program-assigned`, `legal-entity.created`,
   `policy.legal-entity-assigned`), with conditional Quartz HTTP dispatch.
 
 Every second-slice mutation accepts an optional `If-Match` strong entity tag
@@ -129,6 +129,25 @@ default to the source policy. The source policy is never mutated; the new policy
 carries `renewedFromPolicyId` and copied coverage, limit, insured, and location
 terms rebound to the new term. `policy.policy.renewed` is written in the same
 transaction.
+
+Premium audit is exposed under `/api/v1/policies/{policyId}/premium-audit` (the
+same controller keeps the `/internal/v1` alias for the domain adapter):
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/v1/policies/{policyId}/premium-audit` | Replace the policy premium with the audited amount on a `BOUND`, `ISSUED`, `IN_FORCE`, `ENDORSED`, or `REINSTATED` policy; `201` with the updated policy and its new `ETag` |
+
+The audit body is `{auditedPremium, effectiveDate, reason, approvedBy?,
+approvalRef?}`. `auditedPremium` must be non-negative and must differ from the
+current premium (`400 NO_PREMIUM_CHANGE` otherwise), `reason` is mandatory, and
+`effectiveDate` is resolved by the version timeline (a date before inception or
+a regression of the current version needs `approvedBy` and `approvalRef`). An
+accepted audit writes a `PREMIUM_AUDIT` endorsement and version with the signed
+premium delta and description `Premium audit: old -> new (delta)`, replaces
+`policy.premiumAmount`, bumps the aggregate version, and writes
+`policy.policy.premium-audited` (`policyId`, `policyNumber`, `previousPremium`,
+`auditedPremium`, `delta`, `currency`, `effectiveDate`, `reason`) plus
+`policy.policy.version-issued` in the same transaction.
 
 Billing is also exposed under `/api/v1/policies/{policyId}/billing` (the same
 controller keeps the `/internal/v1` alias for the domain adapter):

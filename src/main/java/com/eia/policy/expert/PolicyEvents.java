@@ -39,6 +39,7 @@ final class PolicyEvents {
     static final String UPDATED = "policy.policy.updated";
     static final String VERSION_ISSUED = "policy.policy.version-issued";
     static final String ENDORSED = "policy.policy.endorsed";
+    static final String PREMIUM_AUDITED = "policy.policy.premium-audited";
     static final String CANCELLED = "policy.policy.cancelled";
     static final String REINSTATED = "policy.policy.reinstated";
     static final String RENEWED = "policy.policy.renewed";
@@ -471,6 +472,27 @@ final class PolicyEvents {
         data.put("approvedBy", endorsement.approvedBy());
         putVersion(data, version);
         return envelope(policy, ENDORSED, data, now);
+    }
+
+    /**
+     * A premium audit replaces the policy premium. The payload is the audit
+     * contract: the policy identity, the premium before and after the audit,
+     * the signed movement, the policy currency, the audit business date, and
+     * the mandatory reason.
+     */
+    static EventEnvelope premiumAudited(Policy policy, BigDecimal previousPremium,
+                                        BigDecimal auditedPremium, BigDecimal delta,
+                                        LocalDate effectiveDate, String reason, Instant now) {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("policyId", policy.id());
+        data.put("policyNumber", policy.policyNumber());
+        data.put("previousPremium", money(previousPremium));
+        data.put("auditedPremium", money(auditedPremium));
+        data.put("delta", money(delta));
+        data.put("currency", policy.premiumCurrency());
+        data.put("effectiveDate", date(effectiveDate));
+        data.put("reason", reason);
+        return envelope(policy, PREMIUM_AUDITED, data, now);
     }
 
     static EventEnvelope cancelled(Policy policy, PolicyCancellation cancellation,

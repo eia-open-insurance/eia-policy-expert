@@ -174,6 +174,21 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   `creditNoteId`, `noteNumber`, `amount`, `currency`, `status`, `createdAt`)
   written in the same transaction as the note and policy version bump; a linked
   note adds `cancellationId` and `cancellationNumber`.
+- Premium audit command: `POST /api/v1/policies/{policyId}/premium-audit` (and
+  the `/internal/v1` alias) accepts `{auditedPremium, effectiveDate, reason,
+  approvedBy?, approvalRef?}` on a `BOUND`, `ISSUED`, `IN_FORCE`, `ENDORSED`, or
+  `REINSTATED` policy. The audited premium must be non-negative and must change
+  the policy premium (`400 NO_PREMIUM_CHANGE`); the reason is mandatory; the
+  effective date is resolved by `VersionTimeline`, including the backdate
+  reason/approval gate.
+- A premium audit writes a `PREMIUM_AUDIT` endorsement and `policy_version`
+  with the signed delta and description
+  `Premium audit: old -> new (delta)`, replaces `policy.premium_amount`, bumps
+  the aggregate version, and writes `policy.policy.premium-audited`
+  (`policyId`, `policyNumber`, `previousPremium`, `auditedPremium`, `delta`,
+  `currency`, `effectiveDate`, `reason`) plus `policy.policy.version-issued` in
+  the same transaction. The endorsement type check is migrated idempotently for
+  existing databases.
 
 ### Changed
 
@@ -183,6 +198,9 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   existing business codes are unchanged.
 - Policy versions are issued on `ISSUED` and on every material post-issue change
   (coverage, insured, location, endorsement, cancellation, reinstatement).
+- Issuing a `BOUND` policy that was already premium-audited supersedes the
+  audit's `PREMIUM_AUDIT` version first, so the policy keeps exactly one
+  `ISSUED` version.
 
 ### Removed
 

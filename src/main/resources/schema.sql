@@ -373,12 +373,25 @@ CREATE TABLE IF NOT EXISTS policy_endorsement (
     CONSTRAINT uq_policy_endorsement_sequence UNIQUE (policy_id, sequence),
     CONSTRAINT ck_policy_endorsement_type CHECK (endorsement_type IN (
         'COVERAGE', 'LIMIT', 'PARTY', 'PREMIUM', 'RETENTION', 'EXCLUSION', 'TERRITORY',
-        'CANCELLATION', 'REINSTATEMENT', 'NON_RENEWAL', 'CORRECTION', 'MANUSCRIPT'
+        'CANCELLATION', 'REINSTATEMENT', 'NON_RENEWAL', 'CORRECTION', 'MANUSCRIPT',
+        'PREMIUM_AUDIT'
     )),
     CONSTRAINT ck_policy_endorsement_impact
         CHECK (coverage_impact IN ('NONE', 'BROADEN', 'RESTRICT', 'CLARIFY')),
     CONSTRAINT ck_policy_endorsement_status CHECK (status IN ('DRAFT', 'ISSUED', 'VOID'))
 );
+
+-- Premium audits use a dedicated endorsement type. PostgreSQL has no
+-- ADD CONSTRAINT IF NOT EXISTS, so the type check is dropped and re-added on
+-- startup; that is idempotent and admits the new value on an already-migrated
+-- database.
+ALTER TABLE policy_endorsement DROP CONSTRAINT IF EXISTS ck_policy_endorsement_type;
+ALTER TABLE policy_endorsement ADD CONSTRAINT ck_policy_endorsement_type
+    CHECK (endorsement_type IN (
+        'COVERAGE', 'LIMIT', 'PARTY', 'PREMIUM', 'RETENTION', 'EXCLUSION', 'TERRITORY',
+        'CANCELLATION', 'REINSTATEMENT', 'NON_RENEWAL', 'CORRECTION', 'MANUSCRIPT',
+        'PREMIUM_AUDIT'
+    ));
 
 CREATE INDEX IF NOT EXISTS idx_policy_endorsement_policy
     ON policy_endorsement (tenant_id, policy_id, sequence);

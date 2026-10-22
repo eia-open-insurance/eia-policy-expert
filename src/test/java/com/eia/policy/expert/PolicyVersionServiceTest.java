@@ -150,6 +150,25 @@ class PolicyVersionServiceTest {
     }
 
     @Test
+    void issuingAfterAnAuditClosesTheCurrentIssuedVersionFirst() {
+        Policy policy = policy();
+        PolicyVersion current = issuedVersion(policy, "a".repeat(64));
+        when(versionRepository.findDraft(TENANT, POLICY_ID)).thenReturn(Optional.empty());
+        when(versionRepository.findIssued(TENANT, POLICY_ID)).thenReturn(Optional.of(current));
+        when(versionRepository.nextVersionNumber(TENANT, POLICY_ID)).thenReturn(2);
+        when(snapshotLoader.load(TENANT, POLICY_ID)).thenReturn(PolicySnapshot.empty());
+        when(versionRepository.issueDraft(eq(TENANT), eq(POLICY_ID), any(), any(), any(), any(),
+                anyString())).thenReturn(1);
+
+        PolicyVersion issued = service().issuePolicyVersion(policy, null);
+
+        assertThat(issued.changeType()).isEqualTo("ISSUE");
+        assertThat(issued.status()).isEqualTo("ISSUED");
+        verify(versionRepository).supersede(TENANT, POLICY_ID, current.id(),
+                current.effectiveFrom());
+    }
+
+    @Test
     void listingVersionsRejectsAnUnknownPolicy() {
         when(policyRepository.findById(TENANT, POLICY_ID)).thenReturn(Optional.empty());
 

@@ -11,7 +11,8 @@ import java.util.UUID;
 public final class EndorsementRules {
     public static final Set<String> TYPES = Set.of(
             "COVERAGE", "LIMIT", "PARTY", "PREMIUM", "RETENTION", "EXCLUSION", "TERRITORY",
-            "CANCELLATION", "REINSTATEMENT", "NON_RENEWAL", "CORRECTION", "MANUSCRIPT"
+            "CANCELLATION", "REINSTATEMENT", "NON_RENEWAL", "CORRECTION", "MANUSCRIPT",
+            "PREMIUM_AUDIT"
     );
     public static final Set<String> CHANGE_TYPES = Set.of(
             "ADD", "REMOVE", "BROADEN", "RESTRICT", "CLARIFY"

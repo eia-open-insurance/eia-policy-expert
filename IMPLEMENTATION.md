@@ -16,7 +16,9 @@ the nullable `policy.program_id` assignment), a legal entity catalog slice (tena
 upper-case codes plus the nullable `policy.legal_entity_id` assignment), and a
 credit note slice (DRAFT/ISSUED/APPLIED/CANCELLED/REVERSED billing adjustments
 with per-policy numbering, cancellation return-premium links, application to open
-installments, and credit reversal) from SPEC 11.2.
+installments, and credit reversal) from SPEC 11.2. A premium audit command
+replaces the policy premium, issues a `PREMIUM_AUDIT` endorsement and version,
+and writes `policy.policy.premium-audited` for a bound or in-force term.
 
 Policy writes also append canonical domain events to the platform transactional
 outbox (SPEC 7.5.1) in the same database transaction as the aggregate write.
@@ -32,6 +34,7 @@ outbox (SPEC 7.5.1) in the same database transaction as the aggregate write.
 | `PolicyPartyController` / `PolicyPartyService` / `PolicyPartyRepository` | Insureds and locations |
 | `CancellationController` / `CancellationService` / `CancellationRepository` | Cancellation, return premium, reinstatement |
 | `PolicyRenewalController` / `PolicyRenewalService` / `PolicyRenewalRules` | Renewal DRAFT creation, predecessor lineage, term inheritance |
+| `PremiumAuditController` / `PremiumAuditService` / `PremiumAuditRules` | Version-timeline-aware premium replacement, `PREMIUM_AUDIT` endorsement/version, and the audit outbox event |
 | `BillingController` / `BillingService` / `BillingRepository` | Billing plan, installment schedule, PAID/WAIVED settlement, and the paid/waived/credited/outstanding plan summary |
 | `BillingDunningController` / `BillingDunningService` / `BillingDunningRepository` | Installment dunning actions, duplicate-level arbitration, and the dunning outbox event |
 | `BillingReceivablesController` / `ReceivableRow` / `InstallmentReceivable` | Tenant-wide open-premium receivables read model with derived overdue status, outstanding-after-credit amounts, and latest-SENT dunning enrichment |
@@ -265,9 +268,9 @@ The live smoke is opt-in and requires PostgreSQL.
   cancellation/retry, billing instructions, and SAP AR reconciliation
   (SPEC 11.2.13) are not exposed yet.
 - Mass tort coverage blocks, occurrences, layers, forms, exclusions, rating
-  exposures, premium audit, and the claim/cession/reinsurance projections are
-  not implemented. The profile itself is exposed, but the separate
-  `policy_coverage_block` table is still a gap.
+  exposures, and the claim/cession/reinsurance projections are not implemented.
+  The profile itself is exposed, but the separate `policy_coverage_block` table
+  is still a gap.
 - The program catalog is create/list/get plus policy assignment only. Capacity
   is a single optional amount/currency pair on the program; the SPEC 11.2.16
   `program_version`/`program_capacity` provider shares, fronting/coinsurance
@@ -307,5 +310,9 @@ The live smoke is opt-in and requires PostgreSQL.
   subscription registry in this slice; enabling dispatch requires
   `EIA_OUTBOX_ENDPOINT` and an HMAC signing secret for production.
 - Support for multiple concurrent `DRAFT` versions, corrections that void a
-  version, and `VOID` / `PREMIUM_AUDIT` change types is schema-ready but not
-  exposed.
+  version, and the `VOID` change type is schema-ready but not exposed.
+- Premium audit is a versioned policy command only. The SPEC
+  `policy_premium_audit` worksheet (audit periods, audit type,
+  reported exposure, deposit/rated/additional/return premium, and
+  SCHEDULED/IN_REVIEW/FINALIZED statuses) and the quarterly
+  `policy.premium-audit-batch` are not implemented.

@@ -87,6 +87,13 @@ public class PolicyVersionService {
         UUID policyId = policy.id();
         PolicyVersion draft = versionRepository.findDraft(tenantId, policyId).orElse(null);
         if (draft == null) {
+            // A premium audit on a BOUND policy issues a version before the
+            // policy is formally issued. Close that current version first so the
+            // ISSUE version can become the single ISSUED row (the partial unique
+            // index is the concurrency arbiter in PostgreSQL).
+            versionRepository.findIssued(tenantId, policyId).ifPresent(current ->
+                    versionRepository.supersede(tenantId, policyId, current.id(),
+                            current.effectiveFrom()));
             int versionNumber = versionRepository.nextVersionNumber(tenantId, policyId);
             draft = new PolicyVersion(UUID.randomUUID(), tenantId, policyId, versionNumber,
                     policy.policyNumber() + "-" + String.format("%02d", versionNumber),

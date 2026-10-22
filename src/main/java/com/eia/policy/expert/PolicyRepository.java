@@ -5,6 +5,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
 
+import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -164,6 +165,20 @@ public class PolicyRepository {
                    SET version = version + 1, updated_at = ?
                  WHERE tenant_id = ? AND id = ? AND version = ?
                 """, Timestamp.from(Instant.now()), tenantId, id, expectedVersion);
+    }
+
+    /**
+     * Replaces the policy premium with the audited amount and bumps the
+     * aggregate version in one conditional statement. Zero rows means the
+     * policy changed after it was read; the caller turns that into a canonical
+     * conflict.
+     */
+    public int updatePremium(UUID tenantId, UUID id, BigDecimal premiumAmount, int expectedVersion) {
+        return jdbc.update("""
+                UPDATE policy
+                   SET premium_amount = ?, version = version + 1, updated_at = ?
+                 WHERE tenant_id = ? AND id = ? AND version = ?
+                """, premiumAmount, Timestamp.from(Instant.now()), tenantId, id, expectedVersion);
     }
 
     /**
