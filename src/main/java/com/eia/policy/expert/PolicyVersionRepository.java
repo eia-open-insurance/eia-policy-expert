@@ -163,6 +163,25 @@ public class PolicyVersionRepository {
                 """, cutover, cutover, tenantId, policyId, versionId);
     }
 
+    /**
+     * Marks every open DRAFT or ISSUED version SUPERSEDED and closes its window
+     * at the cutover. Historical rows that were never closed (multiple open
+     * versions left by earlier issuances) are healed in one statement so a new
+     * version cannot overlap a stale open window.
+     */
+    public int supersedeAllOpen(UUID tenantId, UUID policyId, LocalDate cutover) {
+        return jdbc.update("""
+                UPDATE policy_version
+                   SET status = 'SUPERSEDED',
+                       effective_to = CASE
+                           WHEN effective_to IS NULL AND CAST(? AS DATE) > effective_from
+                               THEN CAST(? AS DATE)
+                           ELSE effective_to
+                       END
+                 WHERE tenant_id = ? AND policy_id = ? AND status IN ('DRAFT', 'ISSUED')
+                """, cutover, cutover, tenantId, policyId);
+    }
+
     private static Instant instant(Timestamp timestamp) {
         return timestamp == null ? null : timestamp.toInstant();
     }

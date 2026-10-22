@@ -1,6 +1,7 @@
 package com.eia.policy.expert;
 
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -10,8 +11,8 @@ import java.util.UUID;
 /**
  * Issues the next immutable policy version. Callers insert the endorsement (or
  * other child rows) first, so the canonical hash captures the post-change
- * snapshot; the previous ISSUED version is then superseded and its effective
- * window closed.
+ * snapshot; every open version is then superseded and its effective window
+ * closed before the new version is validated and inserted.
  */
 @Component
 public class VersionIssuer {
@@ -24,6 +25,7 @@ public class VersionIssuer {
         this.snapshotLoader = snapshotLoader;
     }
 
+    @Transactional
     public PolicyVersion issue(Policy policy,
                                UUID versionId,
                                String changeType,
@@ -49,11 +51,12 @@ public class VersionIssuer {
         PolicySnapshot snapshot = snapshotLoader.load(tenantId, policyId);
         PolicyVersion issued = candidate.withHash(
                 PolicyVersionHasher.hash(policy, candidate, snapshot));
+        // Close every stale DRAFT/ISSUED row first; otherwise a historical open
+        // window would trip the overlap check and block this issuance.
+        versionRepository.supersedeAllOpen(tenantId, policyId, effectiveFrom);
         VersionTimeline.validateNoOverlap(effectiveFrom, null, policy.expirationDate(),
-                current == null ? null : current.id(), versionRepository.findWindows(tenantId, policyId));
-        if (current != null) {
-            versionRepository.supersede(tenantId, policyId, current.id(), effectiveFrom);
-        }
+                current == null ? null : current.id(),
+                versionRepository.findWindows(tenantId, policyId));
         versionRepository.insert(issued);
         return issued;
     }
