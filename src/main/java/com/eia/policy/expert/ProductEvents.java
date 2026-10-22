@@ -20,12 +20,10 @@ import java.util.UUID;
  *
  * <p>The requested event names are {@code product.product.created} and
  * {@code product.product.status-changed}, so the canonical vertical is
- * {@code product}. The platform {@code EventVerticals} registry does not admit
- * that vertical yet, so the rows are built directly as {@link OutboxEvent}s with
- * the same payload and header JSON the canonical envelope factory produces. The
- * stored event types are final; once {@code eia-platform} admits the vertical,
- * {@code OutboxEvent.toEnvelope()} reconstructs the canonical envelope (and the
- * subject) unchanged.</p>
+ * {@code product}; {@code eia-platform} now admits that vertical. The rows are
+ * built directly as {@link OutboxEvent}s with the same payload and header JSON
+ * the canonical envelope factory produces, and {@code OutboxEvent.toEnvelope()}
+ * reconstructs the canonical envelope (and the subject) unchanged.</p>
  *
  * <p>A product is a catalog aggregate, so create is aggregate version one and
  * every accepted status change advances the row version, which makes the event
