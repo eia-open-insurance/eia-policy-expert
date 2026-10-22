@@ -347,6 +347,8 @@ same controller keeps the `/internal/v1` alias for the domain adapter):
 | `POST` | `/api/v1/policies/submissions` | Create a `RECEIVED` submission; `201` with the generated `submissionNumber` |
 | `GET` | `/api/v1/policies/submissions/{id}` | One submission; `404 SUBMISSION_NOT_FOUND`; `policyId` is populated after conversion |
 | `PATCH` | `/api/v1/policies/submissions/{id}/status` | Apply `{status, reason?}`; returns the updated submission with its new `ETag`, `409 INVALID_SUBMISSION_TRANSITION` for an out-of-order or terminal transition |
+| `POST` | `/api/v1/policies/submissions/{id}/referral` | Open or update the structured referral `{reason, authority, referredTo, notes?}` on a `RECEIVED`/`REFERRED` submission; moves it to `REFERRED`, sets `referralDecision=PENDING`, `409 SUBMISSION_NOT_REFERRABLE` for any later status |
+| `POST` | `/api/v1/policies/submissions/{id}/referral/decision` | Decide the pending referral `{decision, decidedBy, notes?}`; `APPROVED` keeps `REFERRED`, `DECLINED` also sets the lifecycle to `DECLINED`, `409 REFERRAL_NOT_PENDING` when no decision is pending |
 | `POST` | `/api/v1/policies/submissions/{id}/convert` | Convert a `QUOTED` (or unlinked `BOUND`) submission into a `DRAFT` policy; `201` with the policy, `200 Idempotent-Replayed: true` when the linked policy already exists or the `Idempotency-Key` is replayed, `409 SUBMISSION_NOT_CONVERTIBLE` for any other status |
 
 The create body is `{applicantPartyId, productCode, requestedEffectiveDate,
@@ -370,6 +372,23 @@ transition bumps the submission version and writes
 `updatedAt`, `reason`). The optional reason is trimmed, capped at 500
 characters, and carried on the event as the audit explanation. A submission from
 another tenant is `404 SUBMISSION_NOT_FOUND`.
+
+A structured referral records `referralReason`, `referralAuthority`,
+`referredTo`, and optional `referralNotes` plus a `referralDecision`
+(`PENDING`/`APPROVED`/`DECLINED`), `referralDecidedBy`, and
+`referralDecidedAt`. `POST /api/v1/policies/submissions/{id}/referral` takes
+`{reason, authority, referredTo, notes?}` (required fields capped at 64/64/128
+characters, notes at 2000), is accepted only while the submission is `RECEIVED`
+or `REFERRED`, moves it to `REFERRED`, and (re)starts the decision at `PENDING`;
+the update is an upsert that bumps the version and writes
+`policy.submission.referred`. The decision command takes
+`{decision, decidedBy, notes?}`, requires the pending decision, and writes
+`policy.submission.referral-decided`: `APPROVED` keeps the submission
+`REFERRED`, while `DECLINED` also moves the lifecycle to `DECLINED`. Decision
+notes, when supplied, replace the referral notes. A submission past intake is
+`409 SUBMISSION_NOT_REFERRABLE`; a decision without a pending referral is `409
+REFERRAL_NOT_PENDING`. The submission projection exposes all seven referral
+members.
 
 `POST /api/v1/policies/submissions/{id}/convert` takes
 `{premiumAmount, premiumCurrency, expirationDate?}` and creates a `DRAFT` policy

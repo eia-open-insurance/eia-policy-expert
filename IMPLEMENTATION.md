@@ -450,6 +450,55 @@ transition writes `policy.submission.status-changed` in the same transaction as
 the submission row, so a rollback leaves neither the aggregate change nor the
 event behind. Both event names are additive contract entries, reported above.
 
+### Structured referrals
+
+The referral columns are additive and nullable: `referral_reason VARCHAR(64)`,
+`referral_authority VARCHAR(64)`, `referred_to VARCHAR(128)`,
+`referral_notes VARCHAR(2000)`, `referral_decision VARCHAR(32)`,
+`referral_decided_by VARCHAR(128)`, and `referral_decided_at TIMESTAMPTZ`. A
+`ck_underwriting_submission_referral_decision` check allows only
+`PENDING`/`APPROVED`/`DECLINED` (or null). The production DDL adds each column
+with `ADD COLUMN IF NOT EXISTS` and drops/re-adds the constraint, so the
+schema-init path is idempotent for existing databases; `schema-h2.sql` mirrors
+the same columns and ALTERs, and `idx_underwriting_submission_tenant_referral`
+supports a tenant-scoped pending-decision scan.
+
+`POST /api/v1/policies/submissions/{id}/referral` (also `/internal/v1`) accepts
+`{reason, authority, referredTo, notes?}`. The reason and authority are capped
+at 64 characters and `referredTo` at 128; notes are optional and capped at 2000.
+Only `RECEIVED` and `REFERRED` are referrable; every later status is `409
+SUBMISSION_NOT_REFERRABLE` with `submissionId` and `currentStatus` in `meta`.
+The command is an upsert of the referral details: it sets the status to
+`REFERRED`, starts (or restarts) `referral_decision=PENDING`, clears any prior
+decider/timestamp, increments the version, and returns the updated submission
+with `ETag: "<version>"`. Calling it again while already `REFERRED` updates the
+details without leaving `REFERRED`. The update predicate includes the read
+version and status, so a concurrent winner is `409 CONCURRENT_MODIFICATION`
+without a row change or event. The accepted command writes
+`policy.submission.referred` in the same transaction as the row.
+
+`POST /api/v1/policies/submissions/{id}/referral/decision` accepts
+`{decision, decidedBy, notes?}`. `decision` is normalized upper-case and must be
+`APPROVED` or `DECLINED`; `PENDING` and unknown values are `400
+INVALID_SUBMISSION_REFERRAL_DECISION`. `decidedBy` is required and capped at
+128 characters; notes are capped at 2000 and, when supplied, replace
+`referral_notes` (an omitted note keeps the referral narrative). The command
+requires a pending decision on a `REFERRED` submission; otherwise it is `409
+REFERRAL_NOT_PENDING` with `submissionId`, `currentStatus`, and
+`referralDecision` in `meta`. `APPROVED` keeps the submission `REFERRED`;
+`DECLINED` also sets the lifecycle status to `DECLINED`. Both set
+`referral_decided_by`, `referral_decided_at`, increment the version, and write
+`policy.submission.referral-decided` in the same transaction. The conditional
+update includes the read version, status, and `PENDING` decision, so a replay or
+concurrent change is `409 CONCURRENT_MODIFICATION` without an event. Both
+referral event names are additive contract entries.
+
+The submission projection exposes `referralReason`, `referralAuthority`,
+`referredTo`, `referralNotes`, `referralDecision`, `referralDecidedBy`, and
+`referralDecidedAt`. A referral does not bypass the status graph: once
+`DECLINED`, the submission is terminal for the lifecycle, and a generic status
+transition from `REFERRED` remains governed by the existing graph.
+
 ## Submission-to-policy conversion
 
 `POST /api/v1/policies/submissions/{id}/convert` (also the `/internal/v1` alias)

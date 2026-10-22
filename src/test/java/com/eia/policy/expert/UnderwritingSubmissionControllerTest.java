@@ -374,6 +374,191 @@ class UnderwritingSubmissionControllerTest {
                 .andExpect(jsonPath("$.meta.currentStatus").value("RECEIVED"));
     }
 
+    @Test
+    void opensAReferralAndReturnsTheNewEtag() throws Exception {
+        when(service.refer(eq(TENANT), eq(SUBMISSION_ID),
+                any(ReferSubmissionRequest.class)))
+                .thenReturn(referralView("REFERRED", "PENDING", null, null, 1));
+
+        mvc.perform(post("/api/v1/policies/submissions/{id}/referral", SUBMISSION_ID)
+                        .param("tenantId", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"reason":"Aggregate limit above authority",
+                                 "authority":"Chief Underwriting Officer",
+                                 "referredTo":"Senior UW - Casualty",
+                                 "notes":"Needs reinsurance sign-off"}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(header().string("ETag", "\"1\""))
+                .andExpect(jsonPath("$.status").value("REFERRED"))
+                .andExpect(jsonPath("$.referralReason")
+                        .value("Aggregate limit above authority"))
+                .andExpect(jsonPath("$.referralAuthority")
+                        .value("Chief Underwriting Officer"))
+                .andExpect(jsonPath("$.referredTo").value("Senior UW - Casualty"))
+                .andExpect(jsonPath("$.referralNotes").value("Needs reinsurance sign-off"))
+                .andExpect(jsonPath("$.referralDecision").value("PENDING"))
+                .andExpect(jsonPath("$.version").value(1));
+
+        ArgumentCaptor<ReferSubmissionRequest> captor =
+                ArgumentCaptor.forClass(ReferSubmissionRequest.class);
+        verify(service).refer(eq(TENANT), eq(SUBMISSION_ID), captor.capture());
+        assertThat(captor.getValue().reason())
+                .isEqualTo("Aggregate limit above authority");
+        assertThat(captor.getValue().referredTo()).isEqualTo("Senior UW - Casualty");
+    }
+
+    @Test
+    void acceptsAReferralUnderTheInternalAliasAndTenantHeader() throws Exception {
+        when(service.refer(eq(TENANT), eq(SUBMISSION_ID),
+                any(ReferSubmissionRequest.class)))
+                .thenReturn(referralView("REFERRED", "PENDING", null, null, 1));
+
+        mvc.perform(post("/internal/v1/policies/submissions/{id}/referral", SUBMISSION_ID)
+                        .header("X-EIA-Tenant", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"reason":"Limit","authority":"Authority",
+                                 "referredTo":"Assignee"}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.referralDecision").value("PENDING"));
+
+        verify(service).refer(eq(TENANT), eq(SUBMISSION_ID),
+                any(ReferSubmissionRequest.class));
+    }
+
+    @Test
+    void rejectsAnInvalidReferralBodyBeforeTheService() throws Exception {
+        for (String body : List.of(
+                """
+                {"authority":"Authority","referredTo":"Assignee"}
+                """,
+                """
+                {"reason":"Reason","referredTo":"Assignee"}
+                """,
+                """
+                {"reason":"Reason","authority":"Authority"}
+                """,
+                """
+                {"reason":"R","authority":"Authority","referredTo":"Assignee",
+                 "notes":"%s"}
+                """.formatted("N".repeat(2001)))) {
+            mvc.perform(post("/api/v1/policies/submissions/{id}/referral", SUBMISSION_ID)
+                            .param("tenantId", TENANT.toString())
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(body))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"));
+        }
+
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void mapsANonReferrableSubmissionToAConflict() throws Exception {
+        when(service.refer(eq(TENANT), eq(SUBMISSION_ID),
+                any(ReferSubmissionRequest.class)))
+                .thenThrow(PolicyErrors.conflict("SUBMISSION_NOT_REFERRABLE", "status",
+                        "Submission is QUOTED.", java.util.Map.of(
+                                "currentStatus", "QUOTED")));
+
+        mvc.perform(post("/api/v1/policies/submissions/{id}/referral", SUBMISSION_ID)
+                        .param("tenantId", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"reason":"Limit","authority":"Authority",
+                                 "referredTo":"Assignee"}
+                                """))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("SUBMISSION_NOT_REFERRABLE"))
+                .andExpect(jsonPath("$.meta.currentStatus").value("QUOTED"));
+    }
+
+    @Test
+    void decidesAReferralAndReturnsTheNewEtag() throws Exception {
+        when(service.decideReferral(eq(TENANT), eq(SUBMISSION_ID),
+                any(DecideReferralRequest.class)))
+                .thenReturn(referralView("REFERRED", "APPROVED", "Chief Underwriter",
+                        CREATED, 2));
+
+        mvc.perform(post("/api/v1/policies/submissions/{id}/referral/decision", SUBMISSION_ID)
+                        .param("tenantId", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"decision":"approved","decidedBy":"Chief Underwriter",
+                                 "notes":"Approved within authority"}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(header().string("ETag", "\"2\""))
+                .andExpect(jsonPath("$.status").value("REFERRED"))
+                .andExpect(jsonPath("$.referralDecision").value("APPROVED"))
+                .andExpect(jsonPath("$.referralDecidedBy").value("Chief Underwriter"))
+                .andExpect(jsonPath("$.referralDecidedAt").value("2026-10-22T12:00:00Z"));
+
+        ArgumentCaptor<DecideReferralRequest> captor =
+                ArgumentCaptor.forClass(DecideReferralRequest.class);
+        verify(service).decideReferral(eq(TENANT), eq(SUBMISSION_ID), captor.capture());
+        assertThat(captor.getValue().decision()).isEqualTo("approved");
+        assertThat(captor.getValue().decidedBy()).isEqualTo("Chief Underwriter");
+    }
+
+    @Test
+    void rejectsAnInvalidDecisionBodyBeforeTheService() throws Exception {
+        mvc.perform(post("/api/v1/policies/submissions/{id}/referral/decision", SUBMISSION_ID)
+                        .param("tenantId", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"decidedBy":"Chief Underwriter"}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.errors[0].field").value("decision"));
+
+        mvc.perform(post("/api/v1/policies/submissions/{id}/referral/decision", SUBMISSION_ID)
+                        .param("tenantId", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"decision":"APPROVED"}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.errors[0].field").value("decidedBy"));
+
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void mapsADecisionWithoutAPendingReferralToAConflict() throws Exception {
+        when(service.decideReferral(eq(TENANT), eq(SUBMISSION_ID),
+                any(DecideReferralRequest.class)))
+                .thenThrow(PolicyErrors.conflict("REFERRAL_NOT_PENDING", "referralDecision",
+                        "No pending referral.", java.util.Map.of(
+                                "currentStatus", "QUOTED")));
+
+        mvc.perform(post("/api/v1/policies/submissions/{id}/referral/decision", SUBMISSION_ID)
+                        .param("tenantId", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"decision":"DECLINED","decidedBy":"Chief Underwriter"}
+                                """))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("REFERRAL_NOT_PENDING"));
+    }
+
+    private static UnderwritingSubmissionView referralView(String status, String decision,
+                                                           String decidedBy, Instant decidedAt,
+                                                           int version) {
+        return new UnderwritingSubmissionView(SUBMISSION_ID, "SUB-2026-0000001", APPLICANT,
+                "CGL_PRODUCTS", EFFECTIVE, new BigDecimal("2500000.0000"), "USD",
+                List.of("ASBESTOS", "PFAS"), status, POLICY_ID,
+                "Large manufacturing risk", "Aggregate limit above authority",
+                "Chief Underwriting Officer", "Senior UW - Casualty",
+                "Needs reinsurance sign-off", decision, decidedBy, decidedAt, version,
+                CREATED, CREATED);
+    }
+
     private static UnderwritingSubmissionView view(String status, int version) {
         return new UnderwritingSubmissionView(SUBMISSION_ID, "SUB-2026-0000001", APPLICANT,
                 "CGL_PRODUCTS", EFFECTIVE, new BigDecimal("2500000.0000"), "USD",

@@ -62,6 +62,8 @@ final class PolicyEvents {
     static final String SUBMISSION_CREATED = "policy.submission.created";
     static final String SUBMISSION_STATUS_CHANGED = "policy.submission.status-changed";
     static final String SUBMISSION_CONVERTED = "policy.submission.converted";
+    static final String SUBMISSION_REFERRED = "policy.submission.referred";
+    static final String SUBMISSION_REFERRAL_DECIDED = "policy.submission.referral-decided";
 
     private static final Book EVENT_BOOK = Book.DIRECT;
     private static final String VERTICAL = "policy";
@@ -354,6 +356,68 @@ final class PolicyEvents {
         data.put("updatedAt", instant(after.updatedAt()));
         data.put("reason", reason == null ? NullNode.getInstance() : reason);
         return submissionEnvelope(after, SUBMISSION_STATUS_CHANGED, data,
+                after.version() + 1L, now);
+    }
+
+    /**
+     * A structured referral moves the submission into REFERRED and starts a
+     * PENDING decision. The payload carries the referral reason, authority,
+     * assignee, optional notes, and the resulting decision/status/version for
+     * downstream review queues and audit consumers.
+     */
+    static EventEnvelope submissionReferred(UnderwritingSubmission before,
+                                            UnderwritingSubmission after, Instant now) {
+        Objects.requireNonNull(before, "before");
+        Objects.requireNonNull(after, "after");
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("submissionId", after.id());
+        data.put("submissionNumber", after.submissionNumber());
+        data.put("applicantPartyId", after.applicantPartyId());
+        data.put("productCode", after.productCode());
+        data.put("previousStatus", before.status());
+        data.put("status", after.status());
+        data.put("referralReason", after.referralReason());
+        data.put("referralAuthority", after.referralAuthority());
+        data.put("referredTo", after.referredTo());
+        data.put("referralNotes",
+                after.referralNotes() == null
+                        ? NullNode.getInstance() : after.referralNotes());
+        data.put("referralDecision", after.referralDecision());
+        data.put("version", after.version());
+        data.put("updatedAt", instant(after.updatedAt()));
+        return submissionEnvelope(after, SUBMISSION_REFERRED, data,
+                after.version() + 1L, now);
+    }
+
+    /**
+     * A referral decision closes the pending review. An approval keeps the
+     * submission REFERRED; a declination also moves the lifecycle to DECLINED.
+     * The payload names both the decision and the resulting submission status
+     * so a consumer does not have to infer one from the other.
+     */
+    static EventEnvelope submissionReferralDecided(UnderwritingSubmission before,
+                                                   UnderwritingSubmission after, Instant now) {
+        Objects.requireNonNull(before, "before");
+        Objects.requireNonNull(after, "after");
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("submissionId", after.id());
+        data.put("submissionNumber", after.submissionNumber());
+        data.put("applicantPartyId", after.applicantPartyId());
+        data.put("productCode", after.productCode());
+        data.put("previousStatus", before.status());
+        data.put("status", after.status());
+        data.put("decision", after.referralDecision());
+        data.put("decidedBy", after.referralDecidedBy());
+        data.put("decidedAt", instant(after.referralDecidedAt()));
+        data.put("notes",
+                after.referralNotes() == null
+                        ? NullNode.getInstance() : after.referralNotes());
+        data.put("referralReason", after.referralReason());
+        data.put("referralAuthority", after.referralAuthority());
+        data.put("referredTo", after.referredTo());
+        data.put("version", after.version());
+        data.put("updatedAt", instant(after.updatedAt()));
+        return submissionEnvelope(after, SUBMISSION_REFERRAL_DECIDED, data,
                 after.version() + 1L, now);
     }
 

@@ -230,6 +230,31 @@ class SchemaContractTest {
     }
 
     @Test
+    void schemaAddsStructuredReferralColumnsWithAnIdempotentAlter() throws Exception {
+        String schema = schema();
+
+        assertThat(schema).contains("referral_reason VARCHAR(64)");
+        assertThat(schema).contains("referral_authority VARCHAR(64)");
+        assertThat(schema).contains("referred_to VARCHAR(128)");
+        assertThat(schema).contains("referral_notes VARCHAR(2000)");
+        assertThat(schema).contains("referral_decision VARCHAR(32)");
+        assertThat(schema).contains("referral_decided_by VARCHAR(128)");
+        assertThat(schema).contains("referral_decided_at TIMESTAMPTZ");
+        assertThat(schema).contains(
+                "ADD COLUMN IF NOT EXISTS referral_reason VARCHAR(64)");
+        assertThat(schema).contains(
+                "ADD COLUMN IF NOT EXISTS referral_decision VARCHAR(32)");
+        assertThat(schema).contains(
+                "ADD COLUMN IF NOT EXISTS referral_decided_at TIMESTAMPTZ");
+        assertThat(schema).contains(
+                "CONSTRAINT ck_underwriting_submission_referral_decision CHECK (");
+        assertThat(schema).contains(
+                "referral_decision IN ('PENDING', 'APPROVED', 'DECLINED')");
+        assertThat(schema).contains(
+                "idx_underwriting_submission_tenant_referral");
+    }
+
+    @Test
     void schemaIndexesTheTenantWideReceivableScan() throws Exception {
         String schema = schema();
 

@@ -11,6 +11,11 @@ import java.util.UUID;
  * exposes the id as {@code submissionId} and never leaks the tenant column.
  * {@code policyId} is the nullable link to the policy created by conversion, so
  * a client can navigate from an accepted submission to its policy.
+ *
+ * <p>The referral members are null until a structured referral is opened. A
+ * pending referral exposes its reason, authority, assignee, and notes with
+ * {@code referralDecision=PENDING}; a decision adds the decider and timestamp
+ * and moves the decision to {@code APPROVED} or {@code DECLINED}.</p>
  */
 public record UnderwritingSubmissionView(
         UUID submissionId,
@@ -24,6 +29,13 @@ public record UnderwritingSubmissionView(
         String status,
         UUID policyId,
         String notes,
+        String referralReason,
+        String referralAuthority,
+        String referredTo,
+        String referralNotes,
+        String referralDecision,
+        String referralDecidedBy,
+        Instant referralDecidedAt,
         int version,
         Instant createdAt,
         Instant updatedAt
@@ -38,7 +50,22 @@ public record UnderwritingSubmissionView(
                                       Instant createdAt, Instant updatedAt) {
         this(submissionId, submissionNumber, applicantPartyId, productCode,
                 requestedEffectiveDate, requestedLimitAmount, requestedLimitCurrency, tortCodes,
-                status, null, notes, version, createdAt, updatedAt);
+                status, null, notes, null, null, null, null, null, null, null, version,
+                createdAt, updatedAt);
+    }
+
+    /** Compatibility constructor for a pre-referral projection with a policy. */
+    public UnderwritingSubmissionView(UUID submissionId, String submissionNumber,
+                                      UUID applicantPartyId, String productCode,
+                                      LocalDate requestedEffectiveDate,
+                                      BigDecimal requestedLimitAmount,
+                                      String requestedLimitCurrency, List<String> tortCodes,
+                                      String status, UUID policyId, String notes, int version,
+                                      Instant createdAt, Instant updatedAt) {
+        this(submissionId, submissionNumber, applicantPartyId, productCode,
+                requestedEffectiveDate, requestedLimitAmount, requestedLimitCurrency, tortCodes,
+                status, policyId, notes, null, null, null, null, null, null, null, version,
+                createdAt, updatedAt);
     }
 
     static UnderwritingSubmissionView of(UnderwritingSubmission submission) {
@@ -58,6 +85,13 @@ public record UnderwritingSubmissionView(
                 submission.status(),
                 policyId,
                 submission.notes(),
+                submission.referralReason(),
+                submission.referralAuthority(),
+                submission.referredTo(),
+                submission.referralNotes(),
+                submission.referralDecision(),
+                submission.referralDecidedBy(),
+                submission.referralDecidedAt(),
                 submission.version(),
                 submission.createdAt(),
                 submission.updatedAt());

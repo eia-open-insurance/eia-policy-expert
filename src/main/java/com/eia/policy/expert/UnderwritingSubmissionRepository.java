@@ -32,8 +32,10 @@ public class UnderwritingSubmissionRepository {
     private static final String SELECT_COLUMNS = """
             SELECT id, tenant_id, submission_number, applicant_party_id, product_code,
                    requested_effective_date, requested_limit_amount,
-                   requested_limit_currency, tort_codes, status, notes, version,
-                   created_at, updated_at
+                   requested_limit_currency, tort_codes, status, notes,
+                   referral_reason, referral_authority, referred_to, referral_notes,
+                   referral_decision, referral_decided_by, referral_decided_at,
+                   version, created_at, updated_at
               FROM underwriting_submission
             """;
 
@@ -50,6 +52,13 @@ public class UnderwritingSubmissionRepository {
                     tortCodes(rs),
                     rs.getString("status"),
                     rs.getString("notes"),
+                    rs.getString("referral_reason"),
+                    rs.getString("referral_authority"),
+                    rs.getString("referred_to"),
+                    rs.getString("referral_notes"),
+                    rs.getString("referral_decision"),
+                    rs.getString("referral_decided_by"),
+                    instant(rs, "referral_decided_at"),
                     rs.getInt("version"),
                     rs.getTimestamp("created_at").toInstant(),
                     rs.getTimestamp("updated_at").toInstant());
@@ -114,9 +123,11 @@ public class UnderwritingSubmissionRepository {
                     INSERT INTO underwriting_submission
                            (id, tenant_id, submission_number, applicant_party_id, product_code,
                             requested_effective_date, requested_limit_amount,
-                            requested_limit_currency, tort_codes, status, notes, version,
-                            created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            requested_limit_currency, tort_codes, status, notes,
+                            referral_reason, referral_authority, referred_to, referral_notes,
+                            referral_decision, referral_decided_by, referral_decided_at,
+                            version, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """);
             ps.setObject(1, submission.id());
             ps.setObject(2, submission.tenantId());
@@ -130,9 +141,16 @@ public class UnderwritingSubmissionRepository {
                     submission.tortCodes().toArray()));
             ps.setString(10, submission.status());
             ps.setString(11, submission.notes());
-            ps.setInt(12, submission.version());
-            ps.setTimestamp(13, Timestamp.from(submission.createdAt()));
-            ps.setTimestamp(14, Timestamp.from(submission.updatedAt()));
+            ps.setString(12, submission.referralReason());
+            ps.setString(13, submission.referralAuthority());
+            ps.setString(14, submission.referredTo());
+            ps.setString(15, submission.referralNotes());
+            ps.setString(16, submission.referralDecision());
+            ps.setString(17, submission.referralDecidedBy());
+            ps.setTimestamp(18, timestamp(submission.referralDecidedAt()));
+            ps.setInt(19, submission.version());
+            ps.setTimestamp(20, Timestamp.from(submission.createdAt()));
+            ps.setTimestamp(21, Timestamp.from(submission.updatedAt()));
             return ps;
         });
     }
@@ -153,6 +171,62 @@ public class UnderwritingSubmissionRepository {
     }
 
     /**
+     * Creates or updates the structured referral details and moves the
+     * submission to {@code REFERRED}. Any previous decision is cleared and the
+     * new referral starts {@code PENDING}. The predicate includes the version
+     * and expected status, so a concurrent transition is a lost write rather
+     * than an overwrite.
+     */
+    public int updateReferral(UUID tenantId, UUID id, String expectedStatus,
+                              int expectedVersion,
+                              UnderwritingSubmissionRules.ReferralSpec referral,
+                              Instant updatedAt) {
+        return jdbc.update("""
+                UPDATE underwriting_submission
+                   SET status = 'REFERRED',
+                       referral_reason = ?,
+                       referral_authority = ?,
+                       referred_to = ?,
+                       referral_notes = ?,
+                       referral_decision = 'PENDING',
+                       referral_decided_by = NULL,
+                       referral_decided_at = NULL,
+                       version = version + 1,
+                       updated_at = ?
+                 WHERE tenant_id = ? AND id = ? AND version = ? AND status = ?
+                """, referral.reason(), referral.authority(), referral.referredTo(),
+                referral.notes(), Timestamp.from(updatedAt), tenantId, id, expectedVersion,
+                expectedStatus);
+    }
+
+    /**
+     * Records the pending referral's decision. {@code APPROVED} keeps the
+     * target status {@code REFERRED}; {@code DECLINED} moves it to
+     * {@code DECLINED}. Non-null decision notes replace the referral notes and
+     * an omitted note keeps the existing referral narrative. The predicate
+     * includes the expected status and pending decision, so a second decision
+     * or a concurrent transition affects no row.
+     */
+    public int decideReferral(UUID tenantId, UUID id, String targetStatus, String decision,
+                              String decidedBy, String decisionNotes, String expectedStatus,
+                              int expectedVersion, Instant decidedAt) {
+        return jdbc.update("""
+                UPDATE underwriting_submission
+                   SET status = ?,
+                       referral_decision = ?,
+                       referral_decided_by = ?,
+                       referral_decided_at = ?,
+                       referral_notes = COALESCE(?, referral_notes),
+                       version = version + 1,
+                       updated_at = ?
+                 WHERE tenant_id = ? AND id = ? AND version = ? AND status = ?
+                   AND referral_decision = 'PENDING'
+                """, targetStatus, decision, decidedBy, Timestamp.from(decidedAt),
+                decisionNotes, Timestamp.from(decidedAt), tenantId, id, expectedVersion,
+                expectedStatus);
+    }
+
+    /**
      * Bumps the version for a conversion that links a policy to a submission
      * already in BOUND. No status value changes, but the aggregate state (the
      * policy link) does, so the version still advances under the same
@@ -164,6 +238,15 @@ public class UnderwritingSubmissionRepository {
                    SET version = version + 1, updated_at = ?
                  WHERE tenant_id = ? AND id = ? AND version = ?
                 """, Timestamp.from(updatedAt), tenantId, id, expectedVersion);
+    }
+
+    private static Timestamp timestamp(Instant value) {
+        return value == null ? null : Timestamp.from(value);
+    }
+
+    private static Instant instant(ResultSet rs, String column) throws SQLException {
+        Timestamp value = rs.getTimestamp(column);
+        return value == null ? null : value.toInstant();
     }
 
     private static List<String> tortCodes(ResultSet rs) throws SQLException {

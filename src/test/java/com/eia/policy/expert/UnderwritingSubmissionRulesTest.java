@@ -355,6 +355,143 @@ class UnderwritingSubmissionRulesTest {
         assertThat(UnderwritingSubmissionRules.isConvertible(null)).isFalse();
     }
 
+    @Test
+    void normalizesReferralFieldsAndOptionalNotes() {
+        UnderwritingSubmissionRules.ReferralSpec spec =
+                UnderwritingSubmissionRules.validateReferral(new ReferSubmissionRequest(
+                        "  Aggregate limit above authority  ",
+                        "  Chief Underwriting Officer  ",
+                        "  Senior UW - Casualty  ",
+                        "  Needs reinsurance sign-off  "));
+
+        assertThat(spec.reason()).isEqualTo("Aggregate limit above authority");
+        assertThat(spec.authority()).isEqualTo("Chief Underwriting Officer");
+        assertThat(spec.referredTo()).isEqualTo("Senior UW - Casualty");
+        assertThat(spec.notes()).isEqualTo("Needs reinsurance sign-off");
+    }
+
+    @Test
+    void blankReferralNotesBecomeNull() {
+        UnderwritingSubmissionRules.ReferralSpec spec =
+                UnderwritingSubmissionRules.validateReferral(new ReferSubmissionRequest(
+                        "Limit", "Authority", "Assignee", "   "));
+
+        assertThat(spec.notes()).isNull();
+    }
+
+    @Test
+    void rejectsMissingOrOverlongReferralFields() {
+        assertBadRequest(() -> UnderwritingSubmissionRules.validateReferral(null),
+                "INVALID_SUBMISSION_REFERRAL");
+        assertBadRequest(() -> UnderwritingSubmissionRules.validateReferral(
+                new ReferSubmissionRequest(" ", "Authority", "Assignee", null)),
+                "INVALID_SUBMISSION_REFERRAL_REASON");
+        assertBadRequest(() -> UnderwritingSubmissionRules.validateReferral(
+                new ReferSubmissionRequest("R".repeat(65), "Authority", "Assignee", null)),
+                "INVALID_SUBMISSION_REFERRAL_REASON");
+        assertBadRequest(() -> UnderwritingSubmissionRules.validateReferral(
+                new ReferSubmissionRequest("Reason", null, "Assignee", null)),
+                "INVALID_SUBMISSION_REFERRAL_AUTHORITY");
+        assertBadRequest(() -> UnderwritingSubmissionRules.validateReferral(
+                new ReferSubmissionRequest("Reason", "A".repeat(65), "Assignee", null)),
+                "INVALID_SUBMISSION_REFERRAL_AUTHORITY");
+        assertBadRequest(() -> UnderwritingSubmissionRules.validateReferral(
+                new ReferSubmissionRequest("Reason", "Authority", "  ", null)),
+                "INVALID_SUBMISSION_REFERRAL_PARTY");
+        assertBadRequest(() -> UnderwritingSubmissionRules.validateReferral(
+                new ReferSubmissionRequest("Reason", "Authority", "P".repeat(129), null)),
+                "INVALID_SUBMISSION_REFERRAL_PARTY");
+        assertBadRequest(() -> UnderwritingSubmissionRules.validateReferral(
+                new ReferSubmissionRequest("Reason", "Authority", "Assignee", "N".repeat(2001))),
+                "INVALID_SUBMISSION_REFERRAL_NOTES");
+    }
+
+    @Test
+    void onlyReceivedAndReferredSubmissionsAreReferrable() {
+        assertThat(UnderwritingSubmissionRules.isReferrable("RECEIVED")).isTrue();
+        assertThat(UnderwritingSubmissionRules.isReferrable("REFERRED")).isTrue();
+        assertThat(UnderwritingSubmissionRules.isReferrable("QUOTED")).isFalse();
+        assertThat(UnderwritingSubmissionRules.isReferrable("BOUND")).isFalse();
+        assertThat(UnderwritingSubmissionRules.isReferrable("DECLINED")).isFalse();
+        assertThat(UnderwritingSubmissionRules.isReferrable("WITHDRAWN")).isFalse();
+        assertThat(UnderwritingSubmissionRules.isReferrable(null)).isFalse();
+    }
+
+    @Test
+    void normalizesTheDecisionVocabulary() {
+        assertThat(UnderwritingSubmissionRules.normalizeReferralDecision(" approved "))
+                .isEqualTo("APPROVED");
+        assertThat(UnderwritingSubmissionRules.normalizeReferralDecision("declined"))
+                .isEqualTo("DECLINED");
+        assertBadRequest(() -> UnderwritingSubmissionRules.normalizeReferralDecision("PENDING"),
+                "INVALID_SUBMISSION_REFERRAL_DECISION");
+        assertBadRequest(() -> UnderwritingSubmissionRules.normalizeReferralDecision("MAYBE"),
+                "INVALID_SUBMISSION_REFERRAL_DECISION");
+        assertBadRequest(() -> UnderwritingSubmissionRules.normalizeReferralDecision(null),
+                "INVALID_SUBMISSION_REFERRAL_DECISION");
+    }
+
+    @Test
+    void aDecisionRequiresAPendingReferralOnAReferredSubmission() {
+        assertThat(UnderwritingSubmissionRules.isReferralPending(
+                referralSubmission("REFERRED", "PENDING"))).isTrue();
+        assertThat(UnderwritingSubmissionRules.isReferralPending(
+                referralSubmission("REFERRED", "APPROVED"))).isFalse();
+        assertThat(UnderwritingSubmissionRules.isReferralPending(
+                referralSubmission("REFERRED", null))).isFalse();
+        assertThat(UnderwritingSubmissionRules.isReferralPending(
+                referralSubmission("RECEIVED", "PENDING"))).isFalse();
+        assertThat(UnderwritingSubmissionRules.isReferralPending(null)).isFalse();
+    }
+
+    @Test
+    void validatesDecisionFields() {
+        UnderwritingSubmissionRules.ReferralDecisionSpec spec =
+                UnderwritingSubmissionRules.validateReferralDecision(
+                        new DecideReferralRequest(" APPROVED ", "  Chief Underwriter  ",
+                                "  Approved within authority  "));
+        assertThat(spec.decision()).isEqualTo("APPROVED");
+        assertThat(spec.decidedBy()).isEqualTo("Chief Underwriter");
+        assertThat(spec.notes()).isEqualTo("Approved within authority");
+
+        assertBadRequest(() -> UnderwritingSubmissionRules.validateReferralDecision(null),
+                "INVALID_SUBMISSION_REFERRAL_DECISION");
+        assertBadRequest(() -> UnderwritingSubmissionRules.validateReferralDecision(
+                new DecideReferralRequest("APPROVED", " ", null)),
+                "INVALID_SUBMISSION_REFERRAL_DECIDED_BY");
+        assertBadRequest(() -> UnderwritingSubmissionRules.validateReferralDecision(
+                new DecideReferralRequest("APPROVED", "D".repeat(129), null)),
+                "INVALID_SUBMISSION_REFERRAL_DECIDED_BY");
+        assertBadRequest(() -> UnderwritingSubmissionRules.validateReferralDecision(
+                new DecideReferralRequest("APPROVED", "Underwriter", "N".repeat(2001))),
+                "INVALID_SUBMISSION_REFERRAL_NOTES");
+    }
+
+    private static UnderwritingSubmission referralSubmission(String status, String decision) {
+        return new UnderwritingSubmission(UUID.randomUUID(),
+                UUID.fromString("11111111-1111-7111-8111-111111111111"),
+                "SUB-2026-0000001", APPLICANT, "CGL_PRODUCTS", EFFECTIVE,
+                new BigDecimal("2500000.0000"), "USD", List.of(), status, null,
+                "Limit", "Authority", "Assignee", "Notes", decision,
+                "APPROVED".equals(decision) ? "Chief Underwriter" : null,
+                "APPROVED".equals(decision)
+                        ? java.time.Instant.parse("2026-10-22T12:00:00Z") : null,
+                0, java.time.Instant.parse("2026-10-22T12:00:00Z"),
+                java.time.Instant.parse("2026-10-22T12:00:00Z"));
+    }
+
+    private static void assertBadRequest(org.assertj.core.api.ThrowableAssert.ThrowingCallable call,
+                                         String code) {
+        assertThatThrownBy(call)
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException api = (ApiException) ex;
+                    assertThat(api.status())
+                            .isEqualTo(org.springframework.http.HttpStatus.BAD_REQUEST);
+                    assertThat(api.code()).isEqualTo(code);
+                });
+    }
+
     private static UnderwritingSubmission submission(String status) {
         return new UnderwritingSubmission(UUID.randomUUID(),
                 UUID.fromString("11111111-1111-7111-8111-111111111111"),

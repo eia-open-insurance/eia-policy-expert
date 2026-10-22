@@ -25,6 +25,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -395,6 +396,277 @@ class UnderwritingSubmissionServiceTest {
         verifyNoInteractions(outbox);
     }
 
+    @Test
+    void opensAReferralFromReceivedAndEmitsTheReferredEvent() {
+        when(repository.findById(TENANT, SUBMISSION_ID))
+                .thenReturn(Optional.of(submission("RECEIVED", 0)))
+                .thenReturn(Optional.of(referralSubmission("REFERRED", "PENDING", null, null, 1)));
+        when(repository.updateReferral(eq(TENANT), eq(SUBMISSION_ID), eq("RECEIVED"), eq(0),
+                any(UnderwritingSubmissionRules.ReferralSpec.class), any(Instant.class)))
+                .thenReturn(1);
+
+        UnderwritingSubmissionView view = service().refer(TENANT, SUBMISSION_ID,
+                new ReferSubmissionRequest("  Aggregate limit above authority  ",
+                        "Chief Underwriting Officer", "Senior UW - Casualty",
+                        "  Needs reinsurance sign-off  "));
+
+        assertThat(view.status()).isEqualTo("REFERRED");
+        assertThat(view.referralReason()).isEqualTo("Aggregate limit above authority");
+        assertThat(view.referralAuthority()).isEqualTo("Chief Underwriting Officer");
+        assertThat(view.referredTo()).isEqualTo("Senior UW - Casualty");
+        assertThat(view.referralNotes()).isEqualTo("Needs reinsurance sign-off");
+        assertThat(view.referralDecision()).isEqualTo("PENDING");
+        assertThat(view.referralDecidedBy()).isNull();
+        assertThat(view.referralDecidedAt()).isNull();
+        assertThat(view.version()).isEqualTo(1);
+
+        ArgumentCaptor<UnderwritingSubmissionRules.ReferralSpec> spec =
+                ArgumentCaptor.forClass(UnderwritingSubmissionRules.ReferralSpec.class);
+        verify(repository).updateReferral(eq(TENANT), eq(SUBMISSION_ID), eq("RECEIVED"),
+                eq(0), spec.capture(), any(Instant.class));
+        assertThat(spec.getValue().reason()).isEqualTo("Aggregate limit above authority");
+        assertThat(spec.getValue().notes()).isEqualTo("Needs reinsurance sign-off");
+
+        OutboxEvent event = onlyEvent();
+        assertThat(event.eventType()).isEqualTo("policy.submission.referred");
+        assertThat(event.aggregateType()).isEqualTo("UnderwritingSubmission");
+        assertThat(event.aggregateId()).isEqualTo(SUBMISSION_ID);
+        assertThat(event.aggregateVersion()).isEqualTo(2L);
+        assertThat(event.partitionKey()).isEqualTo(SUBMISSION_ID.toString());
+        assertThat(event.payload())
+                .contains("\"submissionId\":\"" + SUBMISSION_ID + "\"")
+                .contains("\"submissionNumber\":\"SUB-2026-0000001\"")
+                .contains("\"previousStatus\":\"RECEIVED\"")
+                .contains("\"status\":\"REFERRED\"")
+                .contains("\"referralReason\":\"Aggregate limit above authority\"")
+                .contains("\"referralAuthority\":\"Chief Underwriting Officer\"")
+                .contains("\"referredTo\":\"Senior UW - Casualty\"")
+                .contains("\"referralNotes\":\"Needs reinsurance sign-off\"")
+                .contains("\"referralDecision\":\"PENDING\"")
+                .contains("\"version\":1");
+    }
+
+    @Test
+    void reRefersAnAlreadyReferredSubmissionAndResetsThePendingDecision() {
+        when(repository.findById(TENANT, SUBMISSION_ID))
+                .thenReturn(Optional.of(referralSubmission("REFERRED", "APPROVED",
+                        "Chief Underwriter", NOW, 2)))
+                .thenReturn(Optional.of(referralSubmission("REFERRED", "PENDING", null, null, 3)));
+        when(repository.updateReferral(eq(TENANT), eq(SUBMISSION_ID), eq("REFERRED"), eq(2),
+                any(UnderwritingSubmissionRules.ReferralSpec.class), any(Instant.class)))
+                .thenReturn(1);
+
+        UnderwritingSubmissionView view = service().refer(TENANT, SUBMISSION_ID,
+                new ReferSubmissionRequest("New evidence", "Authority", "Desk", null));
+
+        assertThat(view.status()).isEqualTo("REFERRED");
+        assertThat(view.referralDecision()).isEqualTo("PENDING");
+        assertThat(view.version()).isEqualTo(3);
+        assertThat(onlyEvent().payload())
+                .contains("\"previousStatus\":\"REFERRED\"")
+                .contains("\"referralDecision\":\"PENDING\"")
+                .contains("\"version\":3");
+    }
+
+    @Test
+    void aSubmissionPastReferralCannotBeReferred() {
+        when(repository.findById(TENANT, SUBMISSION_ID))
+                .thenReturn(Optional.of(submission("QUOTED", 2)));
+
+        assertThatThrownBy(() -> service().refer(TENANT, SUBMISSION_ID,
+                new ReferSubmissionRequest("Reason", "Authority", "Assignee", null)))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException api = (ApiException) ex;
+                    assertThat(api.status()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(api.code()).isEqualTo("SUBMISSION_NOT_REFERRABLE");
+                    assertThat(api.meta())
+                            .containsEntry("currentStatus", "QUOTED");
+                });
+
+        verify(repository, never()).updateReferral(any(), any(), anyString(), anyInt(),
+                any(), any());
+        verifyNoInteractions(outbox);
+    }
+
+    @Test
+    void anInvalidReferralBodyIsRejectedBeforeTheWrite() {
+        when(repository.findById(TENANT, SUBMISSION_ID))
+                .thenReturn(Optional.of(submission("RECEIVED", 0)));
+
+        assertThatThrownBy(() -> service().refer(TENANT, SUBMISSION_ID,
+                new ReferSubmissionRequest("R".repeat(65), "Authority", "Assignee", null)))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> assertThat(((ApiException) ex).code())
+                        .isEqualTo("INVALID_SUBMISSION_REFERRAL_REASON"));
+
+        verify(repository, never()).updateReferral(any(), any(), anyString(), anyInt(),
+                any(), any());
+        verifyNoInteractions(outbox);
+    }
+
+    @Test
+    void aConcurrentReferralIsAConflictWithoutAnEvent() {
+        when(repository.findById(TENANT, SUBMISSION_ID))
+                .thenReturn(Optional.of(submission("RECEIVED", 0)))
+                .thenReturn(Optional.of(submission("REFERRED", 1)));
+        when(repository.updateReferral(eq(TENANT), eq(SUBMISSION_ID), eq("RECEIVED"), eq(0),
+                any(UnderwritingSubmissionRules.ReferralSpec.class), any(Instant.class)))
+                .thenReturn(0);
+
+        assertThatThrownBy(() -> service().refer(TENANT, SUBMISSION_ID,
+                new ReferSubmissionRequest("Reason", "Authority", "Assignee", null)))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException api = (ApiException) ex;
+                    assertThat(api.status()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(api.code()).isEqualTo("CONCURRENT_MODIFICATION");
+                    assertThat(api.meta())
+                            .containsEntry("currentVersion", 1)
+                            .containsEntry("expectedVersion", 0);
+                });
+
+        verifyNoInteractions(outbox);
+    }
+
+    @Test
+    void approvingAPendingReferralKeepsTheSubmissionReferred() {
+        when(repository.findById(TENANT, SUBMISSION_ID))
+                .thenReturn(Optional.of(referralSubmission("REFERRED", "PENDING", null, null, 1)))
+                .thenReturn(Optional.of(referralSubmission("REFERRED", "APPROVED",
+                        "Chief Underwriter", NOW, "Approved within authority", 2)));
+        when(repository.decideReferral(eq(TENANT), eq(SUBMISSION_ID), eq("REFERRED"),
+                eq("APPROVED"), eq("Chief Underwriter"), eq("Approved within authority"),
+                eq("REFERRED"), eq(1), any(Instant.class))).thenReturn(1);
+
+        UnderwritingSubmissionView view = service().decideReferral(TENANT, SUBMISSION_ID,
+                new DecideReferralRequest(" approved ", "  Chief Underwriter  ",
+                        "Approved within authority"));
+
+        assertThat(view.status()).isEqualTo("REFERRED");
+        assertThat(view.referralDecision()).isEqualTo("APPROVED");
+        assertThat(view.referralDecidedBy()).isEqualTo("Chief Underwriter");
+        assertThat(view.referralDecidedAt()).isEqualTo(NOW);
+        assertThat(view.version()).isEqualTo(2);
+
+        OutboxEvent event = onlyEvent();
+        assertThat(event.eventType()).isEqualTo("policy.submission.referral-decided");
+        assertThat(event.aggregateVersion()).isEqualTo(3L);
+        assertThat(event.payload())
+                .contains("\"submissionId\":\"" + SUBMISSION_ID + "\"")
+                .contains("\"previousStatus\":\"REFERRED\"")
+                .contains("\"status\":\"REFERRED\"")
+                .contains("\"decision\":\"APPROVED\"")
+                .contains("\"decidedBy\":\"Chief Underwriter\"")
+                .contains("\"decidedAt\":\"2026-10-22T12:00:00Z\"")
+                .contains("\"notes\":\"Approved within authority\"")
+                .contains("\"referralReason\":\"Aggregate limit above authority\"")
+                .contains("\"version\":2");
+    }
+
+    @Test
+    void decliningAPendingReferralAlsoDeclinesTheSubmission() {
+        when(repository.findById(TENANT, SUBMISSION_ID))
+                .thenReturn(Optional.of(referralSubmission("REFERRED", "PENDING", null, null, 1)))
+                .thenReturn(Optional.of(referralSubmission("DECLINED", "DECLINED",
+                        "Chief Underwriter", NOW, 2)));
+        when(repository.decideReferral(eq(TENANT), eq(SUBMISSION_ID), eq("DECLINED"),
+                eq("DECLINED"), eq("Chief Underwriter"), isNull(), eq("REFERRED"), eq(1),
+                any(Instant.class))).thenReturn(1);
+
+        UnderwritingSubmissionView view = service().decideReferral(TENANT, SUBMISSION_ID,
+                new DecideReferralRequest("DECLINED", "Chief Underwriter", "   "));
+
+        assertThat(view.status()).isEqualTo("DECLINED");
+        assertThat(view.referralDecision()).isEqualTo("DECLINED");
+        assertThat(view.version()).isEqualTo(2);
+        assertThat(onlyEvent().payload())
+                .contains("\"previousStatus\":\"REFERRED\"")
+                .contains("\"status\":\"DECLINED\"")
+                .contains("\"decision\":\"DECLINED\"")
+                .contains("\"notes\":\"Needs reinsurance sign-off\"");
+    }
+
+    @Test
+    void aDecisionWithoutAPendingReferralIsAConflictWithoutAWriteOrEvent() {
+        when(repository.findById(TENANT, SUBMISSION_ID))
+                .thenReturn(Optional.of(submission("REFERRED", 1)));
+
+        assertThatThrownBy(() -> service().decideReferral(TENANT, SUBMISSION_ID,
+                new DecideReferralRequest("APPROVED", "Underwriter", null)))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException api = (ApiException) ex;
+                    assertThat(api.status()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(api.code()).isEqualTo("REFERRAL_NOT_PENDING");
+                    assertThat(api.meta())
+                            .containsEntry("currentStatus", "REFERRED")
+                            .doesNotContainKey("referralDecision");
+                });
+
+        verify(repository, never()).decideReferral(any(), any(), anyString(), anyString(),
+                anyString(), any(), anyString(), anyInt(), any());
+        verifyNoInteractions(outbox);
+    }
+
+    @Test
+    void anInvalidDecisionBodyIsRejectedBeforeTheWrite() {
+        when(repository.findById(TENANT, SUBMISSION_ID))
+                .thenReturn(Optional.of(referralSubmission("REFERRED", "PENDING", null, null, 1)));
+
+        assertThatThrownBy(() -> service().decideReferral(TENANT, SUBMISSION_ID,
+                new DecideReferralRequest("PENDING", "Underwriter", null)))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> assertThat(((ApiException) ex).code())
+                        .isEqualTo("INVALID_SUBMISSION_REFERRAL_DECISION"));
+
+        verify(repository, never()).decideReferral(any(), any(), anyString(), anyString(),
+                anyString(), any(), anyString(), anyInt(), any());
+        verifyNoInteractions(outbox);
+    }
+
+    @Test
+    void aConcurrentDecisionIsAConflictWithoutAnEvent() {
+        when(repository.findById(TENANT, SUBMISSION_ID))
+                .thenReturn(Optional.of(referralSubmission("REFERRED", "PENDING", null, null, 1)))
+                .thenReturn(Optional.of(referralSubmission("REFERRED", "PENDING", null, null, 2)));
+        when(repository.decideReferral(eq(TENANT), eq(SUBMISSION_ID), eq("REFERRED"),
+                eq("APPROVED"), eq("Underwriter"), isNull(), eq("REFERRED"), eq(1),
+                any(Instant.class))).thenReturn(0);
+
+        assertThatThrownBy(() -> service().decideReferral(TENANT, SUBMISSION_ID,
+                new DecideReferralRequest("APPROVED", "Underwriter", null)))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException api = (ApiException) ex;
+                    assertThat(api.status()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(api.code()).isEqualTo("CONCURRENT_MODIFICATION");
+                    assertThat(api.meta())
+                            .containsEntry("currentVersion", 2)
+                            .containsEntry("expectedVersion", 1);
+                });
+
+        verifyNoInteractions(outbox);
+    }
+
+    @Test
+    void referringAMissingSubmissionIsNotFound() {
+        when(repository.findById(TENANT, SUBMISSION_ID)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> service().refer(TENANT, SUBMISSION_ID,
+                new ReferSubmissionRequest("Reason", "Authority", "Assignee", null)))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> assertThat(((ApiException) ex).code())
+                        .isEqualTo("SUBMISSION_NOT_FOUND"));
+        assertThatThrownBy(() -> service().decideReferral(TENANT, SUBMISSION_ID,
+                new DecideReferralRequest("APPROVED", "Underwriter", null)))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> assertThat(((ApiException) ex).code())
+                        .isEqualTo("SUBMISSION_NOT_FOUND"));
+
+        verifyNoInteractions(outbox);
+    }
+
     private OutboxEvent onlyEvent() {
         ArgumentCaptor<OutboxEvent> captor = ArgumentCaptor.forClass(OutboxEvent.class);
         verify(outbox).insert(captor.capture());
@@ -411,6 +683,24 @@ class UnderwritingSubmissionServiceTest {
         return new UnderwritingSubmission(SUBMISSION_ID, TENANT, "SUB-2026-0000001", APPLICANT,
                 "CGL_PRODUCTS", EFFECTIVE, new BigDecimal("2500000.0000"), "USD",
                 List.of("ASBESTOS", "PFAS"), status, "Large manufacturing risk", version,
+                NOW, NOW);
+    }
+
+    private static UnderwritingSubmission referralSubmission(String status, String decision,
+                                                             String decidedBy,
+                                                             Instant decidedAt, int version) {
+        return referralSubmission(status, decision, decidedBy, decidedAt,
+                "Needs reinsurance sign-off", version);
+    }
+
+    private static UnderwritingSubmission referralSubmission(String status, String decision,
+                                                             String decidedBy, Instant decidedAt,
+                                                             String notes, int version) {
+        return new UnderwritingSubmission(SUBMISSION_ID, TENANT, "SUB-2026-0000001", APPLICANT,
+                "CGL_PRODUCTS", EFFECTIVE, new BigDecimal("2500000.0000"), "USD",
+                List.of("ASBESTOS", "PFAS"), status, "Large manufacturing risk",
+                "Aggregate limit above authority", "Chief Underwriting Officer",
+                "Senior UW - Casualty", notes, decision, decidedBy, decidedAt, version,
                 NOW, NOW);
     }
 }

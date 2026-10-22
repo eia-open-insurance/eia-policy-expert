@@ -98,6 +98,48 @@ public class UnderwritingSubmissionController {
     }
 
     /**
+     * Opens or updates the structured referral. Only a RECEIVED or REFERRED
+     * submission is referrable; the command moves it to REFERRED and starts a
+     * PENDING decision. The response carries the updated submission and its
+     * new version as the ETag.
+     */
+    @PostMapping("/{id}/referral")
+    public ResponseEntity<UnderwritingSubmissionView> refer(
+            @PathVariable UUID id,
+            @RequestParam(value = "tenantId", required = false) UUID tenantId,
+            @RequestHeader(value = RequestScope.TENANT_HEADER, required = false)
+            String tenantHeader,
+            @RequestHeader(value = RequestScope.BOOK_HEADER, required = false) String book,
+            @Valid @RequestBody ReferSubmissionRequest request) {
+        RequestScope.requireDirectBook(book);
+        UnderwritingSubmissionView referred = service.refer(
+                RequestScope.tenant(tenantId, tenantHeader), id, request);
+        return ResponseEntity.ok()
+                .eTag(Integer.toString(referred.version()))
+                .body(referred);
+    }
+
+    /**
+     * Decides a pending referral. APPROVED keeps the submission REFERRED and
+     * DECLINED moves it to DECLINED; both record the decider and timestamp.
+     */
+    @PostMapping("/{id}/referral/decision")
+    public ResponseEntity<UnderwritingSubmissionView> decideReferral(
+            @PathVariable UUID id,
+            @RequestParam(value = "tenantId", required = false) UUID tenantId,
+            @RequestHeader(value = RequestScope.TENANT_HEADER, required = false)
+            String tenantHeader,
+            @RequestHeader(value = RequestScope.BOOK_HEADER, required = false) String book,
+            @Valid @RequestBody DecideReferralRequest request) {
+        RequestScope.requireDirectBook(book);
+        UnderwritingSubmissionView decided = service.decideReferral(
+                RequestScope.tenant(tenantId, tenantHeader), id, request);
+        return ResponseEntity.ok()
+                .eTag(Integer.toString(decided.version()))
+                .body(decided);
+    }
+
+    /**
      * Converts a QUOTED (or BOUND) submission into its DRAFT policy. A new
      * conversion is {@code 201}; replaying an already-converted submission or a
      * stored {@code Idempotency-Key} is {@code 200} with {@code

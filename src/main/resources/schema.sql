@@ -867,6 +867,9 @@ CREATE INDEX IF NOT EXISTS idx_policy_rating_worksheet_policy
 -- QUOTED/DECLINED/WITHDRAWN, and QUOTED -> BOUND/DECLINED/WITHDRAWN; BOUND,
 -- DECLINED, and WITHDRAWN are terminal. tort_codes is a PostgreSQL text array;
 -- every code is validated by the application at 20 entries x 32 characters.
+-- The nullable referral_* members carry a structured referral: the reason,
+-- the underwriting authority, the assignee, optional notes, and the
+-- PENDING/APPROVED/DECLINED decision with its decider and timestamp.
 CREATE TABLE IF NOT EXISTS underwriting_submission_number_seq (
     tenant_id UUID PRIMARY KEY,
     next_value BIGINT NOT NULL,
@@ -885,6 +888,13 @@ CREATE TABLE IF NOT EXISTS underwriting_submission (
     tort_codes TEXT[] NOT NULL,
     status VARCHAR(16) NOT NULL,
     notes VARCHAR(2000),
+    referral_reason VARCHAR(64),
+    referral_authority VARCHAR(64),
+    referred_to VARCHAR(128),
+    referral_notes VARCHAR(2000),
+    referral_decision VARCHAR(32),
+    referral_decided_by VARCHAR(128),
+    referral_decided_at TIMESTAMPTZ,
     version INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL,
@@ -896,13 +906,48 @@ CREATE TABLE IF NOT EXISTS underwriting_submission (
         CHECK (CHAR_LENGTH(TRIM(requested_limit_currency)) = 3),
     CONSTRAINT ck_underwriting_submission_status CHECK (status IN (
         'RECEIVED', 'REFERRED', 'QUOTED', 'BOUND', 'DECLINED', 'WITHDRAWN'
-    ))
+    )),
+    CONSTRAINT ck_underwriting_submission_referral_decision CHECK (
+        referral_decision IS NULL
+        OR referral_decision IN ('PENDING', 'APPROVED', 'DECLINED')
+    )
 );
 
 CREATE INDEX IF NOT EXISTS idx_underwriting_submission_tenant_updated
     ON underwriting_submission (tenant_id, updated_at DESC, id);
 CREATE INDEX IF NOT EXISTS idx_underwriting_submission_tenant_status
     ON underwriting_submission (tenant_id, status, updated_at DESC, id);
+
+-- Structured referral columns for databases created before the referral
+-- slice. ADD COLUMN IF NOT EXISTS is idempotent on PostgreSQL; the constraint
+-- is dropped and re-added because PostgreSQL has no ADD CONSTRAINT IF NOT
+-- EXISTS. H2 accepts the same forms.
+ALTER TABLE underwriting_submission
+    ADD COLUMN IF NOT EXISTS referral_reason VARCHAR(64);
+ALTER TABLE underwriting_submission
+    ADD COLUMN IF NOT EXISTS referral_authority VARCHAR(64);
+ALTER TABLE underwriting_submission
+    ADD COLUMN IF NOT EXISTS referred_to VARCHAR(128);
+ALTER TABLE underwriting_submission
+    ADD COLUMN IF NOT EXISTS referral_notes VARCHAR(2000);
+ALTER TABLE underwriting_submission
+    ADD COLUMN IF NOT EXISTS referral_decision VARCHAR(32);
+ALTER TABLE underwriting_submission
+    ADD COLUMN IF NOT EXISTS referral_decided_by VARCHAR(128);
+ALTER TABLE underwriting_submission
+    ADD COLUMN IF NOT EXISTS referral_decided_at TIMESTAMPTZ;
+ALTER TABLE underwriting_submission
+    DROP CONSTRAINT IF EXISTS ck_underwriting_submission_referral_decision;
+ALTER TABLE underwriting_submission
+    ADD CONSTRAINT ck_underwriting_submission_referral_decision CHECK (
+        referral_decision IS NULL
+        OR referral_decision IN ('PENDING', 'APPROVED', 'DECLINED')
+    );
+
+-- Newest-first referral review queue: pending decisions are usually scanned
+-- separately from the lifecycle status.
+CREATE INDEX IF NOT EXISTS idx_underwriting_submission_tenant_referral
+    ON underwriting_submission (tenant_id, referral_decision, updated_at DESC, id);
 
 -- Submission-to-policy conversion (SPEC 11.2.14). A converted policy records
 -- the submission it came from. The column is nullable so every pre-conversion

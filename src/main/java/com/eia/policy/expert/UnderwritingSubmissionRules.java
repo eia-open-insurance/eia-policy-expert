@@ -21,6 +21,14 @@ import java.util.UUID;
  *
  * <p>The database repeats the status, non-negative limit, and currency checks
  * as a backstop.</p>
+ *
+ * <p>A structured referral is a separate command from the lifecycle graph. It
+ * is accepted only while the submission is {@code RECEIVED} or
+ * {@code REFERRED}, stores the reason/authority/assignee plus optional notes,
+ * and starts the decision at {@code PENDING}. A decision requires that
+ * {@code PENDING} state; {@code APPROVED} leaves the submission
+ * {@code REFERRED}, while {@code DECLINED} also moves the lifecycle to
+ * {@code DECLINED}.</p>
  */
 final class UnderwritingSubmissionRules {
     static final int MAX_PRODUCT_CODE_LENGTH = 64;
@@ -29,6 +37,11 @@ final class UnderwritingSubmissionRules {
     static final int MAX_NOTES_LENGTH = 2000;
     static final int MAX_REASON_LENGTH = 500;
     static final int CURRENCY_LENGTH = 3;
+    static final int MAX_REFERRAL_REASON_LENGTH = 64;
+    static final int MAX_REFERRAL_AUTHORITY_LENGTH = 64;
+    static final int MAX_REFERRED_TO_LENGTH = 128;
+    static final int MAX_REFERRAL_NOTES_LENGTH = 2000;
+    static final int MAX_REFERRAL_DECIDED_BY_LENGTH = 128;
 
     static final String RECEIVED = "RECEIVED";
     static final String REFERRED = "REFERRED";
@@ -37,9 +50,16 @@ final class UnderwritingSubmissionRules {
     static final String DECLINED = "DECLINED";
     static final String WITHDRAWN = "WITHDRAWN";
 
+    static final String REFERRAL_PENDING = "PENDING";
+    static final String REFERRAL_APPROVED = "APPROVED";
+
     private static final List<String> STATUSES =
             List.of(RECEIVED, REFERRED, QUOTED, BOUND, DECLINED, WITHDRAWN);
     private static final Set<String> STATUS_SET = Set.copyOf(STATUSES);
+    private static final List<String> REFERRAL_DECISIONS =
+            List.of(REFERRAL_APPROVED, DECLINED);
+    private static final Set<String> REFERRAL_DECISION_SET =
+            Set.copyOf(REFERRAL_DECISIONS);
 
     private UnderwritingSubmissionRules() {
     }
@@ -264,6 +284,111 @@ final class UnderwritingSubmissionRules {
         return value;
     }
 
+    /**
+     * A referral can be opened or re-opened while the submission is still in
+     * intake review. Every later status (QUOTED, BOUND, DECLINED, WITHDRAWN) is
+     * past the referral stage and is a state conflict.
+     */
+    static boolean isReferrable(String status) {
+        return RECEIVED.equals(status) || REFERRED.equals(status);
+    }
+
+    /**
+     * A decision is accepted only for a referral that is currently pending and
+     * still holds the submission in {@code REFERRED}.
+     */
+    static boolean isReferralPending(UnderwritingSubmission submission) {
+        return submission != null
+                && REFERRED.equals(submission.status())
+                && REFERRAL_PENDING.equals(submission.referralDecision());
+    }
+
+    /**
+     * Normalizes and validates one referral body. The reason, authority, and
+     * assignee are required and capped at 64/64/128 characters; notes are
+     * optional and capped at 2000.
+     */
+    static ReferralSpec validateReferral(ReferSubmissionRequest request) {
+        if (request == null) {
+            throw PolicyErrors.badRequest("INVALID_SUBMISSION_REFERRAL", "reason",
+                    "A referral request is required.");
+        }
+        String reason = requiredReferralField(request.reason(),
+                MAX_REFERRAL_REASON_LENGTH, "INVALID_SUBMISSION_REFERRAL_REASON", "reason");
+        String authority = requiredReferralField(request.authority(),
+                MAX_REFERRAL_AUTHORITY_LENGTH, "INVALID_SUBMISSION_REFERRAL_AUTHORITY",
+                "authority");
+        String referredTo = requiredReferralField(request.referredTo(),
+                MAX_REFERRED_TO_LENGTH, "INVALID_SUBMISSION_REFERRAL_PARTY", "referredTo");
+        return new ReferralSpec(reason, authority, referredTo,
+                normalizeReferralNotes(request.notes()));
+    }
+
+    /**
+     * Normalizes and validates one referral-decision body. The decision is
+     * {@code APPROVED} or {@code DECLINED}; {@code decidedBy} is required and
+     * capped at 128 characters; notes are optional and capped at 2000.
+     */
+    static ReferralDecisionSpec validateReferralDecision(DecideReferralRequest request) {
+        if (request == null) {
+            throw PolicyErrors.badRequest("INVALID_SUBMISSION_REFERRAL_DECISION", "decision",
+                    "A referral decision request is required.");
+        }
+        String decision = normalizeReferralDecision(request.decision());
+        String decidedBy = requiredReferralField(request.decidedBy(),
+                MAX_REFERRAL_DECIDED_BY_LENGTH, "INVALID_SUBMISSION_REFERRAL_DECIDED_BY",
+                "decidedBy");
+        return new ReferralDecisionSpec(decision, decidedBy,
+                normalizeReferralNotes(request.notes()));
+    }
+
+    /**
+     * A referred-to assignee may be a person or a desk name, so it is kept as
+     * free text rather than a party UUID.
+     */
+    private static String requiredReferralField(String raw, int maxLength, String code,
+                                                String field) {
+        String value = raw == null ? "" : raw.trim();
+        if (value.isEmpty()) {
+            throw PolicyErrors.badRequest(code, field, field + " is required.");
+        }
+        if (value.length() > maxLength) {
+            throw PolicyErrors.badRequest(code, field,
+                    field + " must be at most " + maxLength + " characters.");
+        }
+        return value;
+    }
+
+    /**
+     * Referral notes are optional on both commands. A blank value is stored as
+     * null and omitted from the event payload.
+     */
+    static String normalizeReferralNotes(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        String value = raw.trim();
+        if (value.length() > MAX_REFERRAL_NOTES_LENGTH) {
+            throw PolicyErrors.badRequest("INVALID_SUBMISSION_REFERRAL_NOTES", "notes",
+                    "notes must be at most " + MAX_REFERRAL_NOTES_LENGTH + " characters.");
+        }
+        return value;
+    }
+
+    /**
+     * Normalizes one decision value. PENDING is not a decidable target, and an
+     * unknown value is a request error rather than a state conflict.
+     */
+    static String normalizeReferralDecision(String raw) {
+        String value = raw == null ? "" : raw.trim().toUpperCase(Locale.ROOT);
+        if (!REFERRAL_DECISION_SET.contains(value)) {
+            throw PolicyErrors.badRequest("INVALID_SUBMISSION_REFERRAL_DECISION", "decision",
+                    "decision must be one of "
+                            + String.join(", ", REFERRAL_DECISIONS) + ".");
+        }
+        return value;
+    }
+
     static boolean canTransition(String currentStatus, String targetStatus) {
         if (currentStatus == null || targetStatus == null) {
             return false;
@@ -294,6 +419,23 @@ final class UnderwritingSubmissionRules {
             BigDecimal requestedLimitAmount,
             String requestedLimitCurrency,
             List<String> tortCodes,
+            String notes
+    ) {
+    }
+
+    /** Normalized referral reason, authority, assignee, and optional notes. */
+    record ReferralSpec(
+            String reason,
+            String authority,
+            String referredTo,
+            String notes
+    ) {
+    }
+
+    /** Normalized decision, decider, and optional decision notes. */
+    record ReferralDecisionSpec(
+            String decision,
+            String decidedBy,
             String notes
     ) {
     }

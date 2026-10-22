@@ -13,6 +13,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -35,6 +36,17 @@ import java.util.UUID;
  * <p>The transition reason is optional and is carried on the event as the audit
  * explanation. It is not a column on the submission: the aggregate records the
  * resulting status and version, while the outbox retains the reason.</p>
+ *
+ * <p>A structured referral is a separate command. It is accepted while the
+ * submission is {@code RECEIVED} or {@code REFERRED}, stores the
+ * reason/authority/assignee and optional notes, moves the status to
+ * {@code REFERRED}, and starts the decision at {@code PENDING}. A decision is
+ * accepted only while that referral is pending: {@code APPROVED} leaves the
+ * status {@code REFERRED}, while {@code DECLINED} also moves the lifecycle to
+ * {@code DECLINED}. Each accepted command writes
+ * {@code policy.submission.referred} or
+ * {@code policy.submission.referral-decided} in the same transaction as the
+ * row change.</p>
  */
 @Service
 public class UnderwritingSubmissionService {
@@ -168,6 +180,71 @@ public class UnderwritingSubmissionService {
         return UnderwritingSubmissionView.of(updated);
     }
 
+    /**
+     * Creates or updates the structured referral and moves the submission to
+     * {@code REFERRED} with a {@code PENDING} decision. Only
+     * {@code RECEIVED}/{@code REFERRED} are referrable; every later status is
+     * a state conflict. The update is conditional on the read version and
+     * status, so a concurrent winner is a canonical 409 and writes no event.
+     */
+    @Transactional
+    public UnderwritingSubmissionView refer(UUID tenantId, UUID submissionId,
+                                            ReferSubmissionRequest request) {
+        UnderwritingSubmission current = requireSubmission(tenantId, submissionId);
+        UnderwritingSubmissionRules.ReferralSpec referral =
+                UnderwritingSubmissionRules.validateReferral(request);
+        if (!UnderwritingSubmissionRules.isReferrable(current.status())) {
+            throw notReferrable(current);
+        }
+
+        Instant now = Instant.now(clock).truncatedTo(ChronoUnit.MICROS);
+        int rows = repository.updateReferral(tenantId, submissionId, current.status(),
+                current.version(), referral, now);
+        if (rows == 0) {
+            UnderwritingSubmission latest = requireSubmission(tenantId, submissionId);
+            throw conflict(latest.version(), current.version());
+        }
+        UnderwritingSubmission updated = requireSubmission(tenantId, submissionId);
+        outbox.insert(OutboxEvent.fromEnvelope(
+                PolicyEvents.submissionReferred(current, updated, now)));
+        return UnderwritingSubmissionView.of(updated);
+    }
+
+    /**
+     * Decides the pending referral. {@code APPROVED} keeps the submission
+     * {@code REFERRED}; {@code DECLINED} also moves it to {@code DECLINED}.
+     * The conditional update requires the still-pending decision and the read
+     * version, so a duplicate decision or a concurrent transition is a
+     * conflict without a row change or an event.
+     */
+    @Transactional
+    public UnderwritingSubmissionView decideReferral(UUID tenantId, UUID submissionId,
+                                                     DecideReferralRequest request) {
+        UnderwritingSubmission current = requireSubmission(tenantId, submissionId);
+        UnderwritingSubmissionRules.ReferralDecisionSpec decision =
+                UnderwritingSubmissionRules.validateReferralDecision(request);
+        if (!UnderwritingSubmissionRules.isReferralPending(current)) {
+            throw referralNotPending(current);
+        }
+
+        String targetStatus =
+                UnderwritingSubmissionRules.REFERRAL_APPROVED.equals(decision.decision())
+                        ? UnderwritingSubmissionRules.REFERRED
+                        : UnderwritingSubmissionRules.DECLINED;
+        Instant now = Instant.now(clock).truncatedTo(ChronoUnit.MICROS);
+        int rows = repository.decideReferral(tenantId, submissionId, targetStatus,
+                decision.decision(), decision.decidedBy(), decision.notes(), current.status(),
+                current.version(), now);
+        if (rows == 0) {
+            UnderwritingSubmission latest = requireSubmission(tenantId, submissionId);
+            throw conflict(latest.version(), current.version());
+        }
+        UnderwritingSubmission updated = requireSubmission(tenantId, submissionId);
+        outbox.insert(OutboxEvent.fromEnvelope(
+                PolicyEvents.submissionReferralDecided(current, updated, now)));
+        return UnderwritingSubmissionView.of(updated);
+    }
+
     private UnderwritingSubmission requireSubmission(UUID tenantId, UUID submissionId) {
         return repository.findById(tenantId, submissionId)
                 .orElseThrow(() -> PolicyErrors.notFound("SUBMISSION_NOT_FOUND",
@@ -204,6 +281,28 @@ public class UnderwritingSubmissionService {
                 Map.of("submissionId", submission.id().toString(),
                         "currentStatus", submission.status(),
                         "targetStatus", target));
+    }
+
+    private static ApiException notReferrable(UnderwritingSubmission submission) {
+        return PolicyErrors.conflict("SUBMISSION_NOT_REFERRABLE", "status",
+                "Submission " + submission.id() + " is " + submission.status()
+                        + " and can only be referred while RECEIVED or REFERRED.",
+                Map.of("submissionId", submission.id().toString(),
+                        "currentStatus", submission.status()));
+    }
+
+    private static ApiException referralNotPending(UnderwritingSubmission submission) {
+        Map<String, Object> meta = new LinkedHashMap<>();
+        meta.put("submissionId", submission.id().toString());
+        meta.put("currentStatus", submission.status());
+        if (submission.referralDecision() != null) {
+            meta.put("referralDecision", submission.referralDecision());
+        }
+        return PolicyErrors.conflict("REFERRAL_NOT_PENDING", "referralDecision",
+                "Submission " + submission.id() + " has no pending referral decision (status "
+                        + submission.status() + ", referralDecision "
+                        + submission.referralDecision() + ").",
+                meta);
     }
 
     private static ApiException conflict(int currentVersion, int expectedVersion) {

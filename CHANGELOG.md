@@ -294,6 +294,25 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   with `200 Idempotent-Replayed: true`.
 - The submission projection exposes `policyId` once conversion has linked a
   policy.
+- Structured referrals on underwriting submissions: nullable
+  `referral_reason`, `referral_authority`, `referred_to`, `referral_notes`,
+  `referral_decision`, `referral_decided_by`, and `referral_decided_at` columns
+  with an idempotent `ADD COLUMN IF NOT EXISTS` migration, a
+  `PENDING`/`APPROVED`/`DECLINED` check, and a tenant-scoped referral index.
+- `POST /api/v1/policies/submissions/{id}/referral` (also `/internal/v1`)
+  accepts `{reason, authority, referredTo, notes?}` on `RECEIVED`/`REFERRED`
+  submissions, upserts the details, moves the submission to `REFERRED` with a
+  `PENDING` decision, bumps the version, and writes
+  `policy.submission.referred`. Any later lifecycle status is `409
+  SUBMISSION_NOT_REFERRABLE`.
+- `POST /api/v1/policies/submissions/{id}/referral/decision` (also
+  `/internal/v1`) accepts `{decision, decidedBy, notes?}`, requires a pending
+  referral (`409 REFERRAL_NOT_PENDING`), keeps `REFERRED` for `APPROVED` and
+  moves to `DECLINED` for `DECLINED`, records the decider/timestamp, and writes
+  `policy.submission.referral-decided`. Both referral commands reject
+  overlong/missing fields and write their event in the same transaction as the
+  row.
+- The submission projection exposes the seven referral members.
 
 ### Fixed
 
