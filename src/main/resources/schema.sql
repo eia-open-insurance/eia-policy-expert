@@ -161,9 +161,11 @@ CREATE INDEX IF NOT EXISTS idx_policy_legal_entity
 -- reserved and completed in the same transaction as the command, so a failed
 -- command leaves no key behind.
 --
--- request_hash and policy_id are the legacy create-policy replay fields. They
--- stay nullable so response-replay rows (rating, submission conversion) do not
--- have to invent a request hash or a policy link.
+-- request_hash is the canonical SHA-256 of the command request. Create-policy
+-- rows have always stored it; rating and submission-conversion rows now store
+-- it too, so a replay with a different request can be rejected as 409 before
+-- any write. policy_id stays the create-policy link and is null for the
+-- response-replay operations.
 CREATE TABLE IF NOT EXISTS policy_idempotency (
     id UUID PRIMARY KEY,
     tenant_id UUID NOT NULL,
@@ -185,6 +187,7 @@ ALTER TABLE policy_idempotency ADD COLUMN IF NOT EXISTS id UUID;
 ALTER TABLE policy_idempotency ADD COLUMN IF NOT EXISTS operation VARCHAR(64);
 ALTER TABLE policy_idempotency ADD COLUMN IF NOT EXISTS response_json TEXT;
 ALTER TABLE policy_idempotency ADD COLUMN IF NOT EXISTS response_status INTEGER;
+ALTER TABLE policy_idempotency ADD COLUMN IF NOT EXISTS request_hash CHAR(64);
 ALTER TABLE policy_idempotency ALTER COLUMN request_hash DROP NOT NULL;
 ALTER TABLE policy_idempotency ALTER COLUMN policy_id DROP NOT NULL;
 UPDATE policy_idempotency

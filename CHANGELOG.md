@@ -24,6 +24,12 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   conversion: the first call is `201`, a replay is `200` with the stored
   worksheet/policy body and ETag, the key is capped at 128 characters, and the
   scope is tenant plus operation.
+- Canonical request hashes on rating and submission conversion idempotency
+  rows: a replay of the same canonical request returns the stored response,
+  while a different base rate, premium, or request under the same key is `409
+  IDEMPOTENCY_CONFLICT` with `meta.operation`/`meta.key` and writes nothing.
+  Decimal scale and surrounding whitespace are normalized before hashing, and
+  the hash carries the policy or submission id so a key cannot cross resources.
 - Second slice: immutable `policy_version` history with a single-ISSUED partial
   unique index, canonical SHA-256 snapshot hashes re-verified on read, and the
   derived current version.

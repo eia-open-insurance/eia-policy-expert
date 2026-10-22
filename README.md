@@ -95,9 +95,10 @@ contract structures from SPEC 11.2:
 Every second-slice mutation accepts an optional `If-Match` strong entity tag
 (the aggregate `version`), returns the new `ETag`, and accepts an optional
 `Idempotency-Key` scoped by tenant and command type. A replay returns `200` with
-`Idempotent-Replayed: true`; for resource commands, reuse with a different
-request is `409 IDEMPOTENCY_CONFLICT`. Rating and submission conversion store
-the successful response body and replay it without re-evaluating the request.
+`Idempotent-Replayed: true`; reuse with a different request is `409
+IDEMPOTENCY_CONFLICT`. Every keyed command stores the SHA-256 of its canonical
+request, so rating and submission conversion also detect a changed body instead
+of replaying the first response for different terms.
 
 ### Second-slice endpoints
 
@@ -342,10 +343,16 @@ and `BOUND` submissions are convertible; every other status is
 `POST /api/v1/policies/{policyId}/rating` and
 `POST /api/v1/policies/submissions/{id}/convert` also accept an optional
 `Idempotency-Key` of at most 128 characters. The first call stores the
-successful response body in `policy_idempotency` in the same transaction as the
-command; a replay returns `200`, `Idempotent-Replayed: true`, the stored body,
-and the original body's ETag. The unique scope is
-`(tenant_id, operation, idempotency_key)`, so the same key can be reused for a
+successful response body and the SHA-256 of its canonical request in
+`policy_idempotency` in the same transaction as the command; a replay with the
+same canonical request returns `200`, `Idempotent-Replayed: true`, the stored
+body, and the original body's ETag. Reusing the key with a different request is
+`409 IDEMPOTENCY_CONFLICT` with `meta.operation` and `meta.key` and writes
+nothing. The canonical form trims and upper-cases enum-like fields and
+normalizes decimal scale, so `0.0125` and `0.012500` match. The unique scope is
+`(tenant_id, operation, idempotency_key)` and the hash also carries the
+`policyId` for rating and the submission id for conversion, so a key cannot
+replay a response from another resource; the same key may still be reused for a
 different command or tenant. An over-long key is `400
 INVALID_IDEMPOTENCY_KEY` before any write. Without a key the command keeps its
 normal behaviour: rating always creates a worksheet and conversion still
@@ -444,8 +451,10 @@ and `lastDunningAt` from the latest `SENT` dunning action for the installment
   body field on status changes. Stale versions are `409
   CONCURRENT_MODIFICATION`.
 - `POST /internal/v1/policies`, policy rating, and submission conversion accept
-  `Idempotency-Key`; the first call is `201`, a replay is `200` with
-  `Idempotent-Replayed: true` and the stored response body/ETag.
+  `Idempotency-Key`; the first call is `201`, a replay of the same canonical
+  request is `200` with `Idempotent-Replayed: true` and the stored response
+  body/ETag, and a changed request under the same key is `409
+  IDEMPOTENCY_CONFLICT`.
 
 ## Local development
 

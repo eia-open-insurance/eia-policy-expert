@@ -13,9 +13,11 @@ import java.util.UUID;
  * Persistence for command idempotency with response replay.
  *
  * <p>A command first reserves its {@code (tenant, operation, key)} row in the
- * same transaction as the business write. Once the command succeeds the row is
- * completed with the serialized response and its original status. A replay
- * reads the completed row and returns the stored body.</p>
+ * same transaction as the business write. The reservation stores the canonical
+ * request hash, so a replay can tell an identical retry from a key reused with
+ * a different request. Once the command succeeds the row is completed with the
+ * serialized response and its original status. A replay reads the completed
+ * row and returns the stored body.</p>
  */
 @Repository
 public class PolicyIdempotencyRepository {
@@ -27,8 +29,8 @@ public class PolicyIdempotencyRepository {
 
     public Optional<PolicyIdempotencyResponse> find(UUID tenantId, String operation, String key) {
         return jdbc.query("""
-                        SELECT id, operation, idempotency_key, response_json, response_status,
-                               created_at
+                        SELECT id, operation, idempotency_key, request_hash, response_json,
+                               response_status, created_at
                           FROM policy_idempotency
                          WHERE tenant_id = ? AND operation = ? AND idempotency_key = ?
                         """,
@@ -36,6 +38,7 @@ public class PolicyIdempotencyRepository {
                         rs.getObject("id", UUID.class),
                         rs.getString("operation"),
                         rs.getString("idempotency_key"),
+                        rs.getString("request_hash"),
                         rs.getString("response_json"),
                         rs.getObject("response_status", Integer.class),
                         rs.getTimestamp("created_at").toInstant()),
@@ -43,18 +46,20 @@ public class PolicyIdempotencyRepository {
     }
 
     /**
-     * Reserves the key with one statement. The unique constraint
-     * {@code (tenant_id, operation, idempotency_key)} is the concurrency
-     * arbiter; {@code ON CONFLICT DO NOTHING} returns zero instead of aborting
-     * the transaction, so the losing caller can read the winner's completed row.
+     * Reserves the key with one statement and stores the canonical request
+     * hash. The unique constraint {@code (tenant_id, operation, idempotency_key)}
+     * is the concurrency arbiter; {@code ON CONFLICT DO NOTHING} returns zero
+     * instead of aborting the transaction, so the losing caller can read the
+     * winner's completed row and compare hashes.
      */
-    public boolean reserve(UUID id, UUID tenantId, String operation, String key) {
+    public boolean reserve(UUID id, UUID tenantId, String operation, String key,
+                           String requestHash) {
         int rows = jdbc.update("""
                 INSERT INTO policy_idempotency
-                       (id, tenant_id, operation, idempotency_key, created_at)
-                VALUES (?, ?, ?, ?, ?)
+                       (id, tenant_id, operation, idempotency_key, request_hash, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT DO NOTHING
-                """, id, tenantId, operation, key, Timestamp.from(Instant.now()));
+                """, id, tenantId, operation, key, requestHash, Timestamp.from(Instant.now()));
         return rows == 1;
     }
 

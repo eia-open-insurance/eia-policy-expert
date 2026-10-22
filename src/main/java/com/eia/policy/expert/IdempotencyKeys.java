@@ -18,8 +18,9 @@ import java.util.UUID;
  * computed from a canonical field-ordered string, so a retry with the same
  * business request replays and a reuse with a different request is rejected.
  * Amounts are normalized numerically ({@code 1000.0} and {@code 1000.0000} hash
- * the same), which matches JSON money semantics. Keys are capped at 128
- * characters for every command, including rating and submission conversion.
+ * the same), enum-like fields are trimmed and upper-cased, and free text is
+ * trimmed, which matches JSON semantics. Keys are capped at 128 characters for
+ * every command, including rating and submission conversion.
  */
 final class IdempotencyKeys {
     static final int MAX_LENGTH = 128;
@@ -57,6 +58,44 @@ final class IdempotencyKeys {
                 + "\nlimitAmount=" + money(request.limitAmount())
                 + "\nlimitCurrency=" + upper(request.limitCurrency());
         return sha256(canonical);
+    }
+
+    /**
+     * Canonical hash for one rating command. The policy id is part of the
+     * canonical form so the same key cannot replay a worksheet from another
+     * policy. The rating method is trimmed and upper-cased, defaults applied by
+     * {@link RatingRequest} are already materialized, and the decimal fields are
+     * normalized numerically, so an equivalent body replays even when its
+     * scale or whitespace differs.
+     */
+    static String requestHash(UUID policyId, RatingRequest request) {
+        StringBuilder canonical = new StringBuilder("policyId=").append(policyId);
+        if (request != null) {
+            canonical.append("\nratingMethod=").append(upper(request.ratingMethod()))
+                    .append("\nbaseRate=").append(money(request.baseRate()))
+                    .append("\nexposureAmount=").append(money(request.exposureAmount()))
+                    .append("\nfactor=").append(money(request.factor()))
+                    .append("\napply=").append(Boolean.TRUE.equals(request.apply()));
+        }
+        return hash(canonical.toString());
+    }
+
+    /**
+     * Canonical hash for one submission conversion. The submission id is part
+     * of the canonical form so the same key cannot replay a policy converted
+     * from another submission. The premium is normalized numerically and the
+     * currency is trimmed and upper-cased, so an equivalent body replays.
+     */
+    static String requestHash(UUID submissionId, ConvertSubmissionRequest request) {
+        StringBuilder canonical = new StringBuilder("submissionId=").append(submissionId);
+        if (request != null) {
+            canonical.append("\npremiumAmount=").append(money(request.premiumAmount()))
+                    .append("\npremiumCurrency=").append(upper(request.premiumCurrency()))
+                    .append("\nexpirationDate=")
+                    .append(request.expirationDate() == null
+                            ? "" : request.expirationDate().toString());
+        }
+        return hash(canonical.toString());
     }
 
     /**

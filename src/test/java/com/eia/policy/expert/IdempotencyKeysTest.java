@@ -59,6 +59,86 @@ class IdempotencyKeysTest {
                 .isNotEqualTo(IdempotencyKeys.requestHash(changedPremium));
     }
 
+    @Test
+    void ratingRequestHashIsStableAcrossScaleAndWhitespace() {
+        UUID policyId = UUID.fromString("33333333-3333-7333-8333-333333333333");
+        RatingRequest first = new RatingRequest("RATE_TIMES_EXPOSURE",
+                new BigDecimal("0.0125"), new BigDecimal("1000000"),
+                new BigDecimal("1.25"), true);
+        RatingRequest second = new RatingRequest(" rate_times_exposure ",
+                new BigDecimal("0.012500"), new BigDecimal("1000000.0000"),
+                new BigDecimal("1.250000"), Boolean.TRUE);
+
+        assertThat(IdempotencyKeys.requestHash(policyId, first))
+                .isEqualTo(IdempotencyKeys.requestHash(policyId, second))
+                .matches("[0-9a-f]{64}");
+    }
+
+    @Test
+    void ratingRequestHashChangesWithEachRatingInput() {
+        UUID policyId = UUID.fromString("33333333-3333-7333-8333-333333333333");
+        RatingRequest base = new RatingRequest("RATE_TIMES_EXPOSURE",
+                new BigDecimal("0.0125"), new BigDecimal("1000000"),
+                new BigDecimal("1.25"), true);
+        String baseHash = IdempotencyKeys.requestHash(policyId, base);
+
+        assertThat(IdempotencyKeys.requestHash(policyId, new RatingRequest("FLAT",
+                new BigDecimal("0.0125"), new BigDecimal("1000000"),
+                new BigDecimal("1.25"), true))).isNotEqualTo(baseHash);
+        assertThat(IdempotencyKeys.requestHash(policyId, new RatingRequest(
+                "RATE_TIMES_EXPOSURE", new BigDecimal("0.0150"),
+                new BigDecimal("1000000"), new BigDecimal("1.25"), true)))
+                .isNotEqualTo(baseHash);
+        assertThat(IdempotencyKeys.requestHash(policyId, new RatingRequest(
+                "RATE_TIMES_EXPOSURE", new BigDecimal("0.0125"),
+                new BigDecimal("2000000"), new BigDecimal("1.25"), true)))
+                .isNotEqualTo(baseHash);
+        assertThat(IdempotencyKeys.requestHash(policyId, new RatingRequest(
+                "RATE_TIMES_EXPOSURE", new BigDecimal("0.0125"),
+                new BigDecimal("1000000"), new BigDecimal("1.3"), true)))
+                .isNotEqualTo(baseHash);
+        assertThat(IdempotencyKeys.requestHash(policyId, new RatingRequest(
+                "RATE_TIMES_EXPOSURE", new BigDecimal("0.0125"),
+                new BigDecimal("1000000"), new BigDecimal("1.25"), false)))
+                .isNotEqualTo(baseHash);
+        assertThat(IdempotencyKeys.requestHash(UUID.randomUUID(), base))
+                .isNotEqualTo(baseHash);
+    }
+
+    @Test
+    void conversionRequestHashIsStableAcrossScaleAndCurrencyWhitespace() {
+        UUID submissionId = UUID.fromString("44444444-4444-7444-8444-444444444444");
+        ConvertSubmissionRequest first = new ConvertSubmissionRequest(
+                new BigDecimal("125000.0"), "USD", null);
+        ConvertSubmissionRequest second = new ConvertSubmissionRequest(
+                new BigDecimal("125000.0000"), " usd ", null);
+
+        assertThat(IdempotencyKeys.requestHash(submissionId, first))
+                .isEqualTo(IdempotencyKeys.requestHash(submissionId, second))
+                .matches("[0-9a-f]{64}");
+    }
+
+    @Test
+    void conversionRequestHashChangesWithPremiumExpirationOrSubmission() {
+        UUID submissionId = UUID.fromString("44444444-4444-7444-8444-444444444444");
+        ConvertSubmissionRequest base = new ConvertSubmissionRequest(
+                new BigDecimal("125000.00"), "USD", null);
+        String baseHash = IdempotencyKeys.requestHash(submissionId, base);
+
+        assertThat(IdempotencyKeys.requestHash(submissionId,
+                new ConvertSubmissionRequest(new BigDecimal("130000.00"), "USD", null)))
+                .isNotEqualTo(baseHash);
+        assertThat(IdempotencyKeys.requestHash(submissionId,
+                new ConvertSubmissionRequest(new BigDecimal("125000.00"), "CAD", null)))
+                .isNotEqualTo(baseHash);
+        assertThat(IdempotencyKeys.requestHash(submissionId,
+                new ConvertSubmissionRequest(new BigDecimal("125000.00"), "USD",
+                        LocalDate.of(2027, 11, 1))))
+                .isNotEqualTo(baseHash);
+        assertThat(IdempotencyKeys.requestHash(UUID.randomUUID(), base))
+                .isNotEqualTo(baseHash);
+    }
+
     private static CreatePolicyRequest request(String policyNumber, String productCode,
                                                BigDecimal premium, BigDecimal limit) {
         return new CreatePolicyRequest(TENANT, policyNumber, productCode, PARTY, null,

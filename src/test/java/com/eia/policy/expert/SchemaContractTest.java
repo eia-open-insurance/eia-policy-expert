@@ -27,6 +27,8 @@ class SchemaContractTest {
                 "CONSTRAINT uq_policy_idempotency_key UNIQUE (tenant_id, operation, idempotency_key)");
         assertThat(schema).contains(
                 "ALTER TABLE policy_idempotency ADD COLUMN IF NOT EXISTS operation VARCHAR(64)");
+        assertThat(schema).contains(
+                "ALTER TABLE policy_idempotency ADD COLUMN IF NOT EXISTS request_hash CHAR(64)");
     }
 
     @Test

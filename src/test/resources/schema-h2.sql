@@ -138,8 +138,9 @@ CREATE INDEX IF NOT EXISTS idx_policy_legal_entity
 
 -- H2-compatible copy of command idempotency with response replay. The
 -- operation scopes the key; response_json/response_status store the original
--- successful response that a replay returns. request_hash/policy_id are the
--- legacy create-policy fields and stay nullable for response-replay rows.
+-- successful response that a replay returns. request_hash is the canonical
+-- request hash for every keyed command; policy_id stays the create-policy link
+-- and is nullable for response-replay rows.
 CREATE TABLE IF NOT EXISTS policy_idempotency (
     id UUID PRIMARY KEY,
     tenant_id UUID NOT NULL,
@@ -160,6 +161,7 @@ ALTER TABLE policy_idempotency ADD COLUMN IF NOT EXISTS id UUID;
 ALTER TABLE policy_idempotency ADD COLUMN IF NOT EXISTS operation VARCHAR(64);
 ALTER TABLE policy_idempotency ADD COLUMN IF NOT EXISTS response_json TEXT;
 ALTER TABLE policy_idempotency ADD COLUMN IF NOT EXISTS response_status INTEGER;
+ALTER TABLE policy_idempotency ADD COLUMN IF NOT EXISTS request_hash CHAR(64);
 ALTER TABLE policy_idempotency ALTER COLUMN request_hash DROP NOT NULL;
 ALTER TABLE policy_idempotency ALTER COLUMN policy_id DROP NOT NULL;
 UPDATE policy_idempotency SET id = RANDOM_UUID() WHERE id IS NULL;

@@ -511,8 +511,12 @@ The live smoke is opt-in and requires PostgreSQL.
   minimum premium, tax/fee amounts, and APPROVED/SUPERSEDED worksheet workflow
   are not modelled; a worksheet has no plan reference and is always
   `CALCULATED`. Rating is not required before quote or bind. The rating command
-  accepts `Idempotency-Key` and replays the stored worksheet/policy response;
-  without a key each accepted command appends a worksheet.
+  accepts `Idempotency-Key`, stores the SHA-256 of the canonical rating request
+  on the key row, and replays the stored worksheet/policy response only for the
+  same request; a changed request under the same key is `409
+  IDEMPOTENCY_CONFLICT` with `meta.operation` and `meta.key`. The hash includes
+  the policy id, so a key cannot replay a worksheet from another policy.
+  Without a key each accepted command appends a worksheet.
 - Underwriting submissions are an intake and conversion record only. The SPEC
   11.2.14 `clearance`, `referral`, `underwriting_authority`, `declination`,
   `policy_quote`, product/form library, eligibility rules, and
@@ -521,6 +525,9 @@ The live smoke is opt-in and requires PostgreSQL.
   vocabulary is the requested slice graph; the SPEC `CLEARANCE` and `RATING`
   intermediate states are not modelled. There is no submission edit or delete
   command, no status history table (the reason lives on the event), and no
-  `If-Match` on the submission commands. Conversion accepts `Idempotency-Key`
-  and replays the stored policy response; without a key it is idempotent by the
-  linked policy.
+  `If-Match` on the submission commands. Conversion accepts `Idempotency-Key`,
+  stores the SHA-256 of the canonical conversion request (premium, currency,
+  expiration, and submission id), and replays the stored policy response only
+  for the same request; a changed request under the same key is `409
+  IDEMPOTENCY_CONFLICT` with `meta.operation` and `meta.key`. Without a key it
+  is idempotent by the linked policy.

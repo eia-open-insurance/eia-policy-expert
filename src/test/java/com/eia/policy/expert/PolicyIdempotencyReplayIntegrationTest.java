@@ -13,6 +13,7 @@ import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 
+import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -21,6 +22,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -106,6 +108,28 @@ class PolicyIdempotencyReplayIntegrationTest {
     }
 
     @Test
+    void legacyCreateKeyReuseWithADifferentRequestStillConflicts() throws Exception {
+        String body = policyCreateBody(TENANT, "POL-IDEM-CREATE-CONFLICT");
+        MvcResult first = mvc.perform(post("/internal/v1/policies")
+                        .header("Idempotency-Key", "create-conflict-key")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isCreated())
+                .andReturn();
+
+        mvc.perform(post("/internal/v1/policies")
+                        .header("Idempotency-Key", "create-conflict-key")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body.replace("120000.00", "130000.00")))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("IDEMPOTENCY_CONFLICT"))
+                .andExpect(jsonPath("$.meta.existingPolicyId").value(
+                        body(first).get("id").asText()));
+
+        assertThat(count("policy")).isEqualTo(1);
+    }
+
+    @Test
     void theSameKeyMayBeUsedForDifferentOperations() throws Exception {
         JsonNode policy = createPolicy(TENANT, "POL-IDEM-OPERATION-SCOPE");
         UUID submissionId = quotedSubmission(TENANT);
@@ -143,11 +167,15 @@ class PolicyIdempotencyReplayIntegrationTest {
         assertThat(count("policy_rating_worksheet")).isEqualTo(2);
 
         Map<String, Object> row = jdbc.queryForMap("""
-                SELECT operation, response_status, response_json
+                SELECT operation, request_hash, response_status, response_json
                   FROM policy_idempotency
                  WHERE tenant_id = ? AND operation = 'rating' AND idempotency_key = ?
                 """, TENANT, "rating-key-1");
         assertThat(row.get("response_status")).isEqualTo(201);
+        assertThat(row.get("request_hash")).isEqualTo(IdempotencyKeys.requestHash(
+                UUID.fromString(policy.get("id").asText()),
+                new RatingRequest("RATE_TIMES_EXPOSURE", new BigDecimal("0.0125"),
+                        new BigDecimal("1000000"), new BigDecimal("1.25"), true)));
         assertThat((String) row.get("response_json"))
                 .contains(firstBody.get("worksheet").get("id").asText())
                 .contains("\"policy\"");
@@ -181,6 +209,73 @@ class PolicyIdempotencyReplayIntegrationTest {
                 .andReturn();
 
         assertThat(body(replay)).isEqualTo(body(first));
+        assertThat(count("policy_rating_worksheet")).isEqualTo(1);
+    }
+
+    @Test
+    void ratingReplayAcceptsAnEquivalentBodyWithDifferentScaleAndWhitespace() throws Exception {
+        JsonNode policy = createPolicy(TENANT, "POL-IDEM-RATE-EQUIV");
+        String path = ratingPath(policy.get("id").asText());
+        JsonNode first = body(rate(path, TENANT, "rating-equiv-key", 201));
+
+        String equivalent = """
+                {"ratingMethod":" rate_times_exposure ","baseRate":0.012500,
+                 "exposureAmount":1000000.0000,"factor":1.250000,"apply":true}
+                """;
+        MvcResult replay = rate(path, TENANT, "rating-equiv-key", equivalent, 200);
+
+        assertThat(body(replay)).isEqualTo(first);
+        assertThat(count("policy_rating_worksheet")).isEqualTo(1);
+    }
+
+    @Test
+    void reusingARatingKeyWithADifferentBaseRateConflictsWithoutWriting() throws Exception {
+        JsonNode policy = createPolicy(TENANT, "POL-IDEM-RATE-CONFLICT");
+        String path = ratingPath(policy.get("id").asText());
+        UUID policyId = UUID.fromString(policy.get("id").asText());
+        body(rate(path, TENANT, "rating-conflict-key", 201));
+
+        String changed = """
+                {"ratingMethod":"RATE_TIMES_EXPOSURE","baseRate":0.0150,
+                 "exposureAmount":1000000,"factor":1.25,"apply":true}
+                """;
+        mvc.perform(post(path)
+                        .param("tenantId", TENANT.toString())
+                        .header("Idempotency-Key", "rating-conflict-key")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(changed))
+                .andExpect(status().isConflict())
+                .andExpect(content().contentTypeCompatibleWith(
+                        MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.code").value("IDEMPOTENCY_CONFLICT"))
+                .andExpect(jsonPath("$.category").value("CONFLICT"))
+                .andExpect(jsonPath("$.errors[0].field").value("Idempotency-Key"))
+                .andExpect(jsonPath("$.meta.operation").value("rating"))
+                .andExpect(jsonPath("$.meta.key").value("rating-conflict-key"));
+
+        assertThat(count("policy_rating_worksheet")).isEqualTo(1);
+        assertThat(jdbc.queryForObject(
+                "SELECT version FROM policy WHERE tenant_id = ? AND id = ?", Integer.class,
+                TENANT, policyId)).isEqualTo(1);
+    }
+
+    @Test
+    void aRatingKeyCannotReplayAWorksheetFromAnotherPolicy() throws Exception {
+        JsonNode firstPolicy = createPolicy(TENANT, "POL-IDEM-RATE-CROSS-A");
+        JsonNode secondPolicy = createPolicy(TENANT, "POL-IDEM-RATE-CROSS-B");
+        body(rate(ratingPath(firstPolicy.get("id").asText()), TENANT,
+                "rating-policy-scoped-key", 201));
+
+        mvc.perform(post(ratingPath(secondPolicy.get("id").asText()))
+                        .param("tenantId", TENANT.toString())
+                        .header("Idempotency-Key", "rating-policy-scoped-key")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(RATING_BODY))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("IDEMPOTENCY_CONFLICT"))
+                .andExpect(jsonPath("$.meta.operation").value("rating"))
+                .andExpect(jsonPath("$.meta.key").value("rating-policy-scoped-key"));
+
         assertThat(count("policy_rating_worksheet")).isEqualTo(1);
     }
 
@@ -273,12 +368,99 @@ class PolicyIdempotencyReplayIntegrationTest {
                 """, Integer.class)).isEqualTo(1);
 
         Map<String, Object> row = jdbc.queryForMap("""
-                SELECT operation, response_status
+                SELECT operation, request_hash, response_status
                   FROM policy_idempotency
                  WHERE tenant_id = ? AND operation = 'conversion'
                    AND idempotency_key = 'conversion-key-1'
                 """, TENANT);
         assertThat(row.get("response_status")).isEqualTo(201);
+        assertThat(row.get("request_hash")).isEqualTo(IdempotencyKeys.requestHash(
+                submissionId, new ConvertSubmissionRequest(
+                        new BigDecimal("125000.00"), "USD", null)));
+    }
+
+    @Test
+    void conversionReplayAcceptsAnEquivalentBodyWithDifferentScale() throws Exception {
+        UUID submissionId = quotedSubmission(TENANT);
+        JsonNode first = body(convert(submissionId, TENANT, "conversion-equiv-key", 201));
+
+        String equivalent =
+                "{\"premiumAmount\":125000.0000,\"premiumCurrency\":\"USD\"}";
+        MvcResult replay = convert(submissionId, TENANT, "conversion-equiv-key",
+                equivalent, 200);
+
+        assertThat(body(replay)).isEqualTo(first);
+        assertThat(count("policy")).isEqualTo(1);
+    }
+
+    @Test
+    void reusingAConversionKeyWithADifferentPremiumConflictsWithoutWriting() throws Exception {
+        UUID submissionId = quotedSubmission(TENANT);
+        body(convert(submissionId, TENANT, "conversion-conflict-key", 201));
+
+        String changed = "{\"premiumAmount\":130000.00,\"premiumCurrency\":\"USD\"}";
+        mvc.perform(post("/api/v1/policies/submissions/{id}/convert", submissionId)
+                        .param("tenantId", TENANT.toString())
+                        .header("Idempotency-Key", "conversion-conflict-key")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(changed))
+                .andExpect(status().isConflict())
+                .andExpect(content().contentTypeCompatibleWith(
+                        MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.code").value("IDEMPOTENCY_CONFLICT"))
+                .andExpect(jsonPath("$.errors[0].field").value("Idempotency-Key"))
+                .andExpect(jsonPath("$.meta.operation").value("conversion"))
+                .andExpect(jsonPath("$.meta.key").value("conversion-conflict-key"));
+
+        assertThat(count("policy")).isEqualTo(1);
+        assertThat(count("policy_idempotency")).isEqualTo(1);
+        assertThat(jdbc.queryForObject("""
+                SELECT count(*) FROM outbox_event
+                 WHERE event_type = 'policy.submission.converted'
+                """, Integer.class)).isEqualTo(1);
+    }
+
+    @Test
+    void reusingAConversionKeyWithADifferentExpirationConflictsWithoutWriting() throws Exception {
+        UUID submissionId = quotedSubmission(TENANT);
+        body(convert(submissionId, TENANT, "conversion-expiration-conflict-key", 201));
+
+        String changed = """
+                {"premiumAmount":125000.00,"premiumCurrency":"USD",
+                 "expirationDate":"2027-12-01"}
+                """;
+        mvc.perform(post("/api/v1/policies/submissions/{id}/convert", submissionId)
+                        .param("tenantId", TENANT.toString())
+                        .header("Idempotency-Key", "conversion-expiration-conflict-key")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(changed))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("IDEMPOTENCY_CONFLICT"))
+                .andExpect(jsonPath("$.meta.operation").value("conversion"))
+                .andExpect(jsonPath("$.meta.key")
+                        .value("conversion-expiration-conflict-key"));
+
+        assertThat(count("policy")).isEqualTo(1);
+        assertThat(count("policy_idempotency")).isEqualTo(1);
+    }
+
+    @Test
+    void aConversionKeyCannotReplayAPolicyFromAnotherSubmission() throws Exception {
+        UUID firstSubmission = quotedSubmission(TENANT);
+        UUID secondSubmission = quotedSubmission(TENANT);
+        body(convert(firstSubmission, TENANT, "conversion-submission-scoped-key", 201));
+
+        mvc.perform(post("/api/v1/policies/submissions/{id}/convert", secondSubmission)
+                        .param("tenantId", TENANT.toString())
+                        .header("Idempotency-Key", "conversion-submission-scoped-key")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(CONVERSION_BODY))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("IDEMPOTENCY_CONFLICT"))
+                .andExpect(jsonPath("$.meta.operation").value("conversion"))
+                .andExpect(jsonPath("$.meta.key").value("conversion-submission-scoped-key"));
+
+        assertThat(count("policy")).isEqualTo(1);
     }
 
     @Test
@@ -370,10 +552,15 @@ class PolicyIdempotencyReplayIntegrationTest {
 
     private MvcResult rate(String path, UUID tenantId, String idempotencyKey,
                            int expectedStatus) throws Exception {
+        return rate(path, tenantId, idempotencyKey, RATING_BODY, expectedStatus);
+    }
+
+    private MvcResult rate(String path, UUID tenantId, String idempotencyKey, String body,
+                           int expectedStatus) throws Exception {
         var request = post(path)
                 .param("tenantId", tenantId.toString())
                 .contentType(MediaType.APPLICATION_JSON)
-                .content(RATING_BODY);
+                .content(body);
         if (idempotencyKey != null) {
             request.header("Idempotency-Key", idempotencyKey);
         }
@@ -405,10 +592,15 @@ class PolicyIdempotencyReplayIntegrationTest {
 
     private MvcResult convert(UUID submissionId, UUID tenantId, String idempotencyKey,
                               int expectedStatus) throws Exception {
+        return convert(submissionId, tenantId, idempotencyKey, CONVERSION_BODY, expectedStatus);
+    }
+
+    private MvcResult convert(UUID submissionId, UUID tenantId, String idempotencyKey,
+                              String body, int expectedStatus) throws Exception {
         var request = post("/api/v1/policies/submissions/{id}/convert", submissionId)
                 .param("tenantId", tenantId.toString())
                 .contentType(MediaType.APPLICATION_JSON)
-                .content(CONVERSION_BODY);
+                .content(body);
         if (idempotencyKey != null) {
             request.header("Idempotency-Key", idempotencyKey);
         }
