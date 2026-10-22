@@ -44,6 +44,7 @@ final class PolicyEvents {
     static final String REINSTATED = "policy.policy.reinstated";
     static final String RENEWED = "policy.policy.renewed";
     static final String BILLING_PLAN_CREATED = "policy.billing-plan.created";
+    static final String BILLING_PLAN_ADJUSTED = "policy.billing-plan.adjusted";
     static final String INSTALLMENT_PAID = "policy.installment.paid";
     static final String INSTALLMENT_WAIVED = "policy.installment.waived";
     static final String DUNNING_SENT = "policy.dunning.sent";
@@ -94,6 +95,32 @@ final class PolicyEvents {
                 ? List.of()
                 : installments.stream().map(PolicyEvents::installmentData).toList());
         return envelope(policy, BILLING_PLAN_CREATED, data, now);
+    }
+
+    /**
+     * A positive premium adjustment appends one DUE installment and moves the
+     * plan total premium up to the policy premium. The payload is the
+     * adjustment contract: the policy and plan identity, the appended amount,
+     * the resulting plan total, and the appended installment number, due date,
+     * and reason.
+     */
+    static EventEnvelope billingPlanAdjusted(Policy policy, PolicyBillingPlan plan,
+                                             PolicyInstallment installment,
+                                             BigDecimal adjustmentAmount, String reason,
+                                             Instant now) {
+        Objects.requireNonNull(plan, "plan");
+        Objects.requireNonNull(installment, "installment");
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("policyId", policy.id());
+        data.put("policyNumber", policy.policyNumber());
+        data.put("planId", plan.id());
+        data.put("adjustmentAmount", money(adjustmentAmount));
+        data.put("newTotalPremium", money(plan.totalPremium()));
+        data.put("installmentId", installment.id());
+        data.put("installmentNumber", installment.installmentNumber());
+        data.put("dueDate", date(installment.dueDate()));
+        data.put("reason", reason);
+        return envelope(policy, BILLING_PLAN_ADJUSTED, data, now);
     }
 
     /**

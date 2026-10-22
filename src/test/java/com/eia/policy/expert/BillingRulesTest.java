@@ -156,6 +156,94 @@ class BillingRulesTest {
         assertThat(sum(spec.installments())).isEqualByComparingTo("120000.0000");
     }
 
+    @Test
+    void validateAdjustmentDerivesThePositiveRemainderAndNextInstallment() {
+        BillingRules.AdjustmentSpec spec = BillingRules.validateAdjustment(
+                new BillingAdjustmentRequest(LocalDate.of(2026, 5, 1), "  exposure audit  "),
+                policy("150000.00"), plan(new BigDecimal("120000.00"), 3, "ACTIVE"));
+
+        assertThat(spec.adjustmentAmount()).isEqualByComparingTo("30000.0000");
+        assertThat(spec.newTotalPremium()).isEqualByComparingTo("150000.0000");
+        assertThat(spec.installmentNumber()).isEqualTo(4);
+        assertThat(spec.dueDate()).isEqualTo(LocalDate.of(2026, 5, 1));
+        assertThat(spec.reason()).isEqualTo("exposure audit");
+    }
+
+    @Test
+    void validateAdjustmentRejectsZeroAndNegativeRemainders() {
+        assertAdjustmentRejected(policy("120000.00"), plan(new BigDecimal("120000.00"), 2, "ACTIVE"),
+                "NO_PREMIUM_ADJUSTMENT", HttpStatus.BAD_REQUEST, "delta");
+        assertAdjustmentRejected(policy("100000.00"), plan(new BigDecimal("120000.00"), 2, "ACTIVE"),
+                "NO_PREMIUM_ADJUSTMENT", HttpStatus.BAD_REQUEST, "delta");
+    }
+
+    @Test
+    void validateAdjustmentRejectsAnInactivePlan() {
+        assertAdjustmentRejected(policy("150000.00"),
+                plan(new BigDecimal("120000.00"), 2, "CANCELLED"),
+                "BILLING_PLAN_NOT_ACTIVE", HttpStatus.CONFLICT, "policyId");
+    }
+
+    @Test
+    void validateAdjustmentAllowsTheTwentyFourthInstallment() {
+        BillingRules.AdjustmentSpec spec = BillingRules.validateAdjustment(
+                new BillingAdjustmentRequest(LocalDate.of(2026, 5, 1), "growth"),
+                policy("150000.00"), plan(new BigDecimal("120000.00"), 23, "ACTIVE"));
+
+        assertThat(spec.installmentNumber()).isEqualTo(24);
+        assertThat(spec.adjustmentAmount()).isEqualByComparingTo("30000.0000");
+        assertThat(spec.newTotalPremium()).isEqualByComparingTo("150000.0000");
+    }
+
+    @Test
+    void validateAdjustmentRejectsAFullScheduleBeforeTheMoneyCheck() {
+        assertAdjustmentRejected(policy("120000.00"), plan(new BigDecimal("120000.00"), 24, "ACTIVE"),
+                "MAX_INSTALLMENTS_REACHED", HttpStatus.CONFLICT, "installmentCount");
+    }
+
+    @Test
+    void validateAdjustmentRequiresAValidDueDateAndReason() {
+        assertAdjustmentRejected(policy("150000.00"), plan(new BigDecimal("120000.00"), 2, "ACTIVE"),
+                new BillingAdjustmentRequest(LocalDate.of(2025, 12, 31), "audit"),
+                "INVALID_ADJUSTMENT_DUE_DATE", HttpStatus.BAD_REQUEST, "dueDate");
+        assertAdjustmentRejected(policy("150000.00"), plan(new BigDecimal("120000.00"), 2, "ACTIVE"),
+                new BillingAdjustmentRequest(LocalDate.of(2026, 5, 1), "   "),
+                "INVALID_ADJUSTMENT_REASON", HttpStatus.BAD_REQUEST, "reason");
+        assertAdjustmentRejected(policy("150000.00"), plan(new BigDecimal("120000.00"), 2, "ACTIVE"),
+                new BillingAdjustmentRequest(LocalDate.of(2026, 5, 1), "x".repeat(501)),
+                "INVALID_ADJUSTMENT_REASON", HttpStatus.BAD_REQUEST, "reason");
+    }
+
+    @Test
+    void validateAdjustmentAllowsThePolicyEffectiveDate() {
+        BillingRules.AdjustmentSpec spec = BillingRules.validateAdjustment(
+                new BillingAdjustmentRequest(LocalDate.of(2026, 1, 1), "inception correction"),
+                policy("150000.00"), plan(new BigDecimal("120000.00"), 2, "ACTIVE"));
+
+        assertThat(spec.dueDate()).isEqualTo(LocalDate.of(2026, 1, 1));
+    }
+
+    private static void assertAdjustmentRejected(Policy policy, PolicyBillingPlan plan,
+                                                 String code, HttpStatus status, String field) {
+        assertAdjustmentRejected(policy, plan,
+                new BillingAdjustmentRequest(LocalDate.of(2026, 5, 1), "audit"),
+                code, status, field);
+    }
+
+    private static void assertAdjustmentRejected(Policy policy, PolicyBillingPlan plan,
+                                                 BillingAdjustmentRequest request, String code,
+                                                 HttpStatus status, String field) {
+        assertThatThrownBy(() -> BillingRules.validateAdjustment(request, policy, plan))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException api = (ApiException) ex;
+                    assertThat(api.status()).isEqualTo(status);
+                    assertThat(api.code()).isEqualTo(code);
+                    assertThat(api.details()).singleElement()
+                            .satisfies(issue -> assertThat(issue.field()).isEqualTo(field));
+                });
+    }
+
     private static List<LocalDate> dueDates(String frequency) {
         return BillingRules.split(new BigDecimal("100.00"), 4, frequency, FIRST_DUE).stream()
                 .map(BillingRules.InstallmentDraft::dueDate)
@@ -179,10 +267,21 @@ class BillingRulesTest {
     }
 
     private static Policy policy() {
+        return policy("120000.00");
+    }
+
+    private static Policy policy(String premium) {
         Instant now = Instant.parse("2026-01-01T00:00:00Z");
         return new Policy(POLICY_ID, TENANT, "POL-2026-0000001", "CGL", UUID.randomUUID(),
                 "ISSUED", LocalDate.of(2026, 1, 1), LocalDate.of(2027, 1, 1),
-                new BigDecimal("120000.0000"), "USD", new BigDecimal("5000000.0000"), "USD",
+                new BigDecimal(premium), "USD", new BigDecimal("5000000.0000"), "USD",
                 0, now, now);
+    }
+
+    private static PolicyBillingPlan plan(BigDecimal totalPremium, int installmentCount,
+                                          String status) {
+        Instant now = Instant.parse("2026-01-01T00:00:00Z");
+        return new PolicyBillingPlan(POLICY_ID, TENANT, POLICY_ID, "BP-0001", totalPremium,
+                "USD", installmentCount, BillingRules.MONTHLY, FIRST_DUE, status, now);
     }
 }

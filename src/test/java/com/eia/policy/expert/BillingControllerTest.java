@@ -162,6 +162,83 @@ class BillingControllerTest {
     }
 
     @Test
+    void appendsAPositiveAdjustmentInstallment() throws Exception {
+        when(service.adjust(eq(TENANT), eq(POLICY_ID), any(BillingAdjustmentRequest.class)))
+                .thenReturn(adjustmentView());
+
+        mvc.perform(post("/api/v1/policies/{policyId}/billing/adjustment", POLICY_ID)
+                        .param("tenantId", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"dueDate":"2026-05-01","reason":"exposure audit"}
+                                """))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.plan.totalPremium").value("150000.0000"))
+                .andExpect(jsonPath("$.plan.installmentCount").value(4))
+                .andExpect(jsonPath("$.installment.installmentNumber").value(4))
+                .andExpect(jsonPath("$.installment.dueDate").value("2026-05-01"))
+                .andExpect(jsonPath("$.installment.amount").value("30000.0000"))
+                .andExpect(jsonPath("$.installment.status").value("DUE"))
+                .andExpect(jsonPath("$.adjustmentAmount").value("30000.0000"))
+                .andExpect(jsonPath("$.newTotalPremium").value("150000.0000"));
+    }
+
+    @Test
+    void validatesTheAdjustmentBody() throws Exception {
+        mvc.perform(post("/api/v1/policies/{policyId}/billing/adjustment", POLICY_ID)
+                        .param("tenantId", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"reason":"audit"}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.errors[0].field").value("dueDate"));
+
+        mvc.perform(post("/api/v1/policies/{policyId}/billing/adjustment", POLICY_ID)
+                        .param("tenantId", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"dueDate":"2026-05-01","reason":"   "}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.errors[0].field").value("reason"));
+    }
+
+    @Test
+    void returns404WhenTheAdjustmentPolicyHasNoPlan() throws Exception {
+        when(service.adjust(eq(TENANT), eq(POLICY_ID), any(BillingAdjustmentRequest.class)))
+                .thenThrow(PolicyErrors.notFound("BILLING_PLAN_NOT_FOUND", "policyId",
+                        "No billing plan exists for policy"));
+
+        mvc.perform(post("/api/v1/policies/{policyId}/billing/adjustment", POLICY_ID)
+                        .param("tenantId", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"dueDate":"2026-05-01","reason":"audit"}
+                                """))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value("BILLING_PLAN_NOT_FOUND"));
+    }
+
+    @Test
+    void returns400WhenThereIsNoPositivePremiumRemainder() throws Exception {
+        when(service.adjust(eq(TENANT), eq(POLICY_ID), any(BillingAdjustmentRequest.class)))
+                .thenThrow(PolicyErrors.badRequest("NO_PREMIUM_ADJUSTMENT", "delta",
+                        "The policy premium does not exceed the billing plan total."));
+
+        mvc.perform(post("/api/v1/policies/{policyId}/billing/adjustment", POLICY_ID)
+                        .param("tenantId", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"dueDate":"2026-05-01","reason":"audit"}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("NO_PREMIUM_ADJUSTMENT"));
+    }
+
+    @Test
     void validatesTheInstallmentStatusBody() throws Exception {
         mvc.perform(patch("/api/v1/policies/{policyId}/billing/installments/{installmentId}",
                         POLICY_ID, INSTALLMENT_ID)
@@ -186,6 +263,16 @@ class BillingControllerTest {
                 installment(1, "40000.0000", "DUE", null),
                 installment(2, "40000.0000", "DUE", null),
                 installment(3, "40000.0000", "DUE", null)));
+    }
+
+    private static BillingAdjustmentView adjustmentView() {
+        PolicyBillingPlan plan = new PolicyBillingPlan(PLAN_ID, TENANT, POLICY_ID, "BP-0001",
+                new BigDecimal("150000.0000"), "USD", 4, "MONTHLY", FIRST_DUE, "ACTIVE", CREATED);
+        PolicyInstallment installment = new PolicyInstallment(INSTALLMENT_ID, TENANT, PLAN_ID, 4,
+                LocalDate.of(2026, 5, 1), new BigDecimal("30000.0000"), "DUE", null, null,
+                CREATED);
+        return new BillingAdjustmentView(plan, installment, new BigDecimal("30000.0000"),
+                new BigDecimal("150000.0000"));
     }
 
     private static PolicyInstallment paidInstallment() {

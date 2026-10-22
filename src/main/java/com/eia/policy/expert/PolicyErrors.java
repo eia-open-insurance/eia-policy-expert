@@ -16,8 +16,13 @@ public final class PolicyErrors {
     }
 
     public static ApiException badRequest(String code, String field, String message) {
+        return badRequest(code, field, message, Map.of());
+    }
+
+    public static ApiException badRequest(String code, String field, String message,
+                                          Map<String, Object> meta) {
         return new ApiException(HttpStatus.BAD_REQUEST, code, message,
-                List.of(new ApiException.FieldIssue(field, code, message)));
+                List.of(new ApiException.FieldIssue(field, code, message)), meta);
     }
 
     public static ApiException validation(String message, List<ApiException.FieldIssue> issues) {

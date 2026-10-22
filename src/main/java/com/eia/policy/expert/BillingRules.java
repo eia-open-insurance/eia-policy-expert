@@ -7,6 +7,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -35,6 +36,9 @@ final class BillingRules {
     static final String PAID = "PAID";
     static final String WAIVED = "WAIVED";
     static final String CREDITED = "CREDITED";
+    static final String ACTIVE = "ACTIVE";
+
+    static final int MAX_ADJUSTMENT_REASON = 500;
 
     private static final Set<String> FREQUENCIES =
             Set.of(MONTHLY, QUARTERLY, SEMI_ANNUAL, ANNUAL);
@@ -67,6 +71,84 @@ final class BillingRules {
         BigDecimal total = Money.of(policy.premiumAmount());
         List<InstallmentDraft> installments = split(total, count, frequency, request.firstDueDate());
         return new PlanSpec(count, frequency, request.firstDueDate(), total, installments);
+    }
+
+    /**
+     * Validates a positive premium adjustment against the ACTIVE plan. The
+     * appended amount is the policy written premium less the plan total, so the
+     * plan always catches up to the policy premium. A non-positive remainder is
+     * {@code NO_PREMIUM_ADJUSTMENT}; a premium decrease must use a credit note.
+     *
+     * <p>The 1..24 installment window is checked before the money remainder so a
+     * full schedule reports {@code MAX_INSTALLMENTS_REACHED} even when the
+     * premium has not moved. The due date is required and may not precede the
+     * policy effective date (the effective date itself is allowed); the reason is
+     * required, trimmed, and capped at 500 characters.</p>
+     */
+    static AdjustmentSpec validateAdjustment(BillingAdjustmentRequest request, Policy policy,
+                                             PolicyBillingPlan plan) {
+        if (request == null) {
+            throw PolicyErrors.badRequest("INVALID_BILLING_ADJUSTMENT", "request",
+                    "A billing adjustment request is required.");
+        }
+        if (plan == null) {
+            throw PolicyErrors.notFound("BILLING_PLAN_NOT_FOUND", "policyId",
+                    "No billing plan exists for policy: " + policy.id());
+        }
+        if (!ACTIVE.equals(plan.status())) {
+            throw PolicyErrors.conflict("BILLING_PLAN_NOT_ACTIVE", "policyId",
+                    "Billing plan " + plan.id() + " is " + plan.status()
+                            + "; only an ACTIVE plan can be adjusted.",
+                    Map.of("planId", plan.id().toString(), "currentStatus", plan.status()));
+        }
+        if (plan.installmentCount() >= MAX_INSTALLMENTS) {
+            throw PolicyErrors.conflict("MAX_INSTALLMENTS_REACHED", "installmentCount",
+                    "A billing plan cannot exceed " + MAX_INSTALLMENTS + " installments.",
+                    Map.of("maxInstallments", MAX_INSTALLMENTS,
+                            "installmentCount", plan.installmentCount()));
+        }
+        LocalDate dueDate = request.dueDate();
+        if (dueDate == null) {
+            throw PolicyErrors.badRequest("INVALID_ADJUSTMENT_DUE_DATE", "dueDate",
+                    "dueDate is required.");
+        }
+        if (policy.effectiveDate() != null && dueDate.isBefore(policy.effectiveDate())) {
+            throw PolicyErrors.badRequest("INVALID_ADJUSTMENT_DUE_DATE", "dueDate",
+                    "dueDate must not be before the policy effective date "
+                            + policy.effectiveDate() + ".");
+        }
+        String reason = normalizeAdjustmentReason(request.reason());
+        BigDecimal adjustmentAmount = adjustmentDelta(policy, plan);
+        if (adjustmentAmount.signum() <= 0) {
+            throw PolicyErrors.badRequest("NO_PREMIUM_ADJUSTMENT", "delta",
+                    "The policy premium does not exceed the billing plan total by a positive"
+                            + " amount; a premium decrease must be handled with a credit note.",
+                    Map.of("delta", adjustmentAmount.toPlainString(),
+                            "policyPremiumAmount", Money.of(policy.premiumAmount()).toPlainString(),
+                            "planTotalPremium",
+                            Money.of(plan.totalPremium()).toPlainString()));
+        }
+        BigDecimal newTotalPremium = Money.of(plan.totalPremium().add(adjustmentAmount));
+        return new AdjustmentSpec(adjustmentAmount, newTotalPremium,
+                plan.installmentCount() + 1, dueDate, reason);
+    }
+
+    /** The positive premium remainder the adjustment bills. */
+    static BigDecimal adjustmentDelta(Policy policy, PolicyBillingPlan plan) {
+        return Money.of(policy.premiumAmount()).subtract(Money.of(plan.totalPremium()));
+    }
+
+    static String normalizeAdjustmentReason(String raw) {
+        if (raw == null || raw.isBlank()) {
+            throw PolicyErrors.badRequest("INVALID_ADJUSTMENT_REASON", "reason",
+                    "reason is required.");
+        }
+        String value = raw.trim();
+        if (value.length() > MAX_ADJUSTMENT_REASON) {
+            throw PolicyErrors.badRequest("INVALID_ADJUSTMENT_REASON", "reason",
+                    "reason must be at most " + MAX_ADJUSTMENT_REASON + " characters.");
+        }
+        return value;
     }
 
     static String normalizeFrequency(String raw) {
@@ -196,5 +278,14 @@ final class BillingRules {
     }
 
     record InstallmentDraft(int installmentNumber, LocalDate dueDate, BigDecimal amount) {
+    }
+
+    record AdjustmentSpec(
+            BigDecimal adjustmentAmount,
+            BigDecimal newTotalPremium,
+            int installmentNumber,
+            LocalDate dueDate,
+            String reason
+    ) {
     }
 }

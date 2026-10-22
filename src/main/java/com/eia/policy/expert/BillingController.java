@@ -45,6 +45,19 @@ public class BillingController {
         return ResponseEntity.status(HttpStatus.CREATED).body(view);
     }
 
+    /**
+     * Appends a positive premium adjustment installment to the ACTIVE plan and
+     * returns the updated plan, the new installment, and the adjustment facts.
+     */
+    @PostMapping("/adjustment")
+    public ResponseEntity<BillingAdjustmentView> adjust(
+            @RequestParam UUID tenantId,
+            @PathVariable UUID policyId,
+            @Valid @RequestBody BillingAdjustmentRequest request) {
+        BillingAdjustmentView view = service.adjust(tenantId, policyId, request);
+        return ResponseEntity.status(HttpStatus.CREATED).body(view);
+    }
+
     @PatchMapping("/installments/{installmentId}")
     public PolicyInstallment updateInstallment(@RequestParam UUID tenantId,
                                                @PathVariable UUID policyId,

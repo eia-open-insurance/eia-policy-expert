@@ -149,6 +149,62 @@ public class BillingService {
     }
 
     /**
+     * Appends one DUE installment for the positive premium remainder between the
+     * policy written premium and the ACTIVE plan total, then moves the plan
+     * total premium up by the same amount and grows the installment count by
+     * one. A plan that is absent is a 404 and a plan that is not ACTIVE is a
+     * 409; a zero or negative remainder is a 400 {@code NO_PREMIUM_ADJUSTMENT}
+     * because a decrease is a credit-note concern, not an installment. The
+     * 1..24 schedule window is enforced before the append.
+     *
+     * <p>The plan update is conditional on the total/count the command read, so
+     * a concurrent adjustment or plan closure makes it return zero and the
+     * whole transaction (including the appended installment) rolls back. The
+     * policy version bump and {@code policy.billing-plan.adjusted} commit with
+     * the plan and installment rows.</p>
+     */
+    @Transactional
+    public BillingAdjustmentView adjust(UUID tenantId, UUID policyId,
+                                        BillingAdjustmentRequest request) {
+        Policy policy = requirePolicy(tenantId, policyId);
+        PolicyBillingPlan plan = billingRepository.findCurrentPlan(tenantId, policyId)
+                .orElseThrow(() -> PolicyErrors.notFound("BILLING_PLAN_NOT_FOUND", "policyId",
+                        "No billing plan exists for policy: " + policyId));
+        BillingRules.AdjustmentSpec spec = BillingRules.validateAdjustment(request, policy, plan);
+
+        Instant now = Instant.now().truncatedTo(ChronoUnit.MICROS);
+        PolicyInstallment installment = new PolicyInstallment(UUID.randomUUID(), tenantId,
+                plan.id(), spec.installmentNumber(), spec.dueDate(), spec.adjustmentAmount(),
+                BillingRules.DUE, null, null, now);
+
+        int rows = billingRepository.updatePlanAfterAdjustment(tenantId, policyId, plan.id(),
+                spec.newTotalPremium(), spec.installmentNumber(), plan.totalPremium(),
+                plan.installmentCount());
+        if (rows == 0) {
+            throw PolicyErrors.conflict("CONCURRENT_MODIFICATION", "policyId",
+                    "The billing plan changed concurrently; reload and retry.");
+        }
+        try {
+            billingRepository.insertInstallment(installment);
+        } catch (DuplicateKeyException ex) {
+            // (plan_id, installment_number) is the concurrency arbiter; a racing
+            // adjustment already took this installment number.
+            throw PolicyErrors.conflict("CONCURRENT_MODIFICATION", "policyId",
+                    "The billing plan changed concurrently; reload and retry.");
+        }
+
+        Policy touched = touch(policy);
+        PolicyBillingPlan updatedPlan = new PolicyBillingPlan(plan.id(), plan.tenantId(),
+                plan.policyId(), plan.planNumber(), spec.newTotalPremium(), plan.currency(),
+                spec.installmentNumber(), plan.frequency(), plan.firstDueDate(), plan.status(),
+                plan.createdAt());
+        outbox.insert(OutboxEvent.fromEnvelope(PolicyEvents.billingPlanAdjusted(touched,
+                updatedPlan, installment, spec.adjustmentAmount(), spec.reason(), now)));
+        return new BillingAdjustmentView(updatedPlan, installment, spec.adjustmentAmount(),
+                spec.newTotalPremium());
+    }
+
+    /**
      * Settles one installment as PAID or WAIVED. Repeating the same terminal
      * status is an idempotent no-op (no new event, no version bump); switching a
      * settled installment to the other terminal status, or settling a CREDITED

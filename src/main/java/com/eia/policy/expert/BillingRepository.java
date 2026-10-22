@@ -121,6 +121,27 @@ public class BillingRepository {
                 installment.paymentId(), Timestamp.from(installment.createdAt()));
     }
 
+    /**
+     * Applies the plan-side change for a positive premium adjustment: the total
+     * premium catches up to the policy premium and the installment count grows
+     * by one. The expected total/count are the values the command read, so a
+     * concurrent adjustment makes this return zero and the caller rolls the
+     * appended installment back. The ACTIVE predicate keeps a concurrently
+     * closed plan from being adjusted.
+     */
+    public int updatePlanAfterAdjustment(UUID tenantId, UUID policyId, UUID planId,
+                                         BigDecimal newTotalPremium, int newInstallmentCount,
+                                         BigDecimal expectedTotalPremium,
+                                         int expectedInstallmentCount) {
+        return jdbc.update("""
+                UPDATE policy_billing_plan
+                   SET total_premium = ?, installment_count = ?
+                 WHERE tenant_id = ? AND policy_id = ? AND id = ? AND status = 'ACTIVE'
+                   AND total_premium = ? AND installment_count = ?
+                """, newTotalPremium, newInstallmentCount, tenantId, policyId, planId,
+                expectedTotalPremium, expectedInstallmentCount);
+    }
+
     public Optional<PolicyBillingPlan> findActivePlan(UUID tenantId, UUID policyId) {
         return jdbc.query(PLAN_COLUMNS + """
                  WHERE tenant_id = ? AND policy_id = ? AND status = 'ACTIVE'

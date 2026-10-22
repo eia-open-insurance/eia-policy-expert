@@ -7,8 +7,9 @@ idempotent create, ETag/If-Match, canonical problems), the second slice
 (versions, coverage and limits, aggregate erosion, endorsements, insureds and
 locations, cancellation and reinstatement), a renewal slice (new DRAFT term with
 predecessor lineage and copied terms), a billing slice (billing plan,
-installment schedule, settlement, dunning actions, and the tenant-wide
-receivables read model), a mass tort profile slice (one profile per policy
+installment schedule, positive premium adjustment installments, settlement,
+dunning actions, and the tenant-wide receivables read model), a mass tort
+profile slice (one profile per policy
 with tort, trigger, allocation, coverage block, and DRAFT/COMPLETE gating), a
 commercial program catalog slice (tenant-unique programs, optional positive
 capacity with its currency, derived used/utilization/policy-count reads, plus
@@ -35,7 +36,7 @@ outbox (SPEC 7.5.1) in the same database transaction as the aggregate write.
 | `CancellationController` / `CancellationService` / `CancellationRepository` | Cancellation, return premium, reinstatement |
 | `PolicyRenewalController` / `PolicyRenewalService` / `PolicyRenewalRules` | Renewal DRAFT creation, predecessor lineage, term inheritance |
 | `PremiumAuditController` / `PremiumAuditService` / `PremiumAuditRules` | Version-timeline-aware premium replacement, `PREMIUM_AUDIT` endorsement/version, and the audit outbox event |
-| `BillingController` / `BillingService` / `BillingRepository` | Billing plan, installment schedule, PAID/WAIVED settlement, and the paid/waived/credited/outstanding plan summary |
+| `BillingController` / `BillingService` / `BillingRepository` | Billing plan, installment schedule, positive premium adjustment installments, PAID/WAIVED settlement, and the paid/waived/credited/outstanding plan summary |
 | `BillingDunningController` / `BillingDunningService` / `BillingDunningRepository` | Installment dunning actions, duplicate-level arbitration, and the dunning outbox event |
 | `BillingReceivablesController` / `ReceivableRow` / `InstallmentReceivable` | Tenant-wide open-premium receivables read model with derived overdue status, outstanding-after-credit amounts, and latest-SENT dunning enrichment |
 | `CreditNoteController` / `CreditNoteService` / `CreditNoteRepository` | Policy credit notes, per-policy numbering, the DRAFT/ISSUED/APPLIED/CANCELLED/REVERSED lifecycle, cancellation return-premium links, application to an open installment, and reversal with credit restore |
@@ -70,6 +71,7 @@ aggregate change and the event row:
 | `POST /internal/v1/policies/{id}/reinstate` | `policy.policy.reinstated` + `policy.policy.version-issued` |
 | `POST /api/v1/policies/{id}/renew` (also `/internal/v1` alias) | `policy.policy.renewed` |
 | `POST /api/v1/policies/{id}/billing` | `policy.billing-plan.created` |
+| `POST /api/v1/policies/{id}/billing/adjustment` | `policy.billing-plan.adjusted`; the positive premium remainder is appended as one DUE installment and the plan total/count move in the same transaction |
 | `PATCH /api/v1/policies/{id}/billing/installments/{installmentId}` | `policy.installment.paid` or `policy.installment.waived`; same-status replay writes nothing |
 | `POST /api/v1/billing/installments/{installmentId}/dunning` (also `/internal/v1` alias) | `policy.dunning.sent`; each accepted action advances the policy version |
 | `POST /api/v1/policies/{id}/credit-notes` (also `/internal/v1` alias) | `policy.credit-note.created`; a linked return-premium note adds `cancellationId`/`cancellationNumber`, and the note is created `DRAFT` |
@@ -112,14 +114,17 @@ emitted as specified; the catalog needs either these two additions or an agreed
 mapping to the existing lifecycle names. This is a contract mismatch owned by
 `eia-contracts`, not by this repository.
 
-The billing events (`policy.billing-plan.created`, `policy.installment.paid`,
+The billing events (`policy.billing-plan.created`,
+`policy.billing-plan.adjusted`, `policy.installment.paid`,
 `policy.installment.waived`) use the canonical three-segment envelope form, so
 `OutboxEvent.fromEnvelope` and the platform dispatcher accept them unchanged.
 They are not yet listed in `eia-contracts/asyncapi/policy.yaml`; the catalog
 needs these additive entries. Billing payloads carry `policyId`,
-`policyNumber`, `planId`, `planNumber`, and either the full installment schedule
-(plan creation) or the settled installment facts (`installmentId`, `number`,
-`amount`, `currency`, `status`, `paymentId`).
+`policyNumber`, and `planId`. Plan creation adds `planNumber` and the full
+installment schedule; the adjustment adds `adjustmentAmount`,
+`newTotalPremium`, `installmentId`, `installmentNumber`, `dueDate`, and
+`reason`; settlement adds `planNumber` and the settled installment facts
+(`installmentId`, `number`, `amount`, `currency`, `status`, `paymentId`).
 
 `policy.dunning.sent` follows the same three-segment form and carries
 `policyId`, `policyNumber`, `installmentId`, `level`, `channel`, `sentAt`, and
@@ -248,6 +253,33 @@ outstanding total is the sum of the row remainders. The tenant-wide receivables
 read keeps `amount` gross but sums `outstandingAmount` into `totalAmount` and
 `overdueAmount`, and it excludes fully CREDITED rows along with PAID/WAIVED.
 
+## Positive premium adjustment installments
+
+`POST /api/v1/policies/{policyId}/billing/adjustment` (and the `/internal/v1`
+alias) accepts `{dueDate, reason}` and bills the positive gap between the policy
+written premium and the ACTIVE plan total: `delta = policy.premiumAmount -
+plan.totalPremium`. It is a 404 `BILLING_PLAN_NOT_FOUND` when the policy has no
+plan and a 409 `BILLING_PLAN_NOT_ACTIVE` when the latest plan is closed. A zero
+or negative delta is a 400 `NO_PREMIUM_ADJUSTMENT` with `delta`,
+`policyPremiumAmount`, and `planTotalPremium` metadata, because a premium
+decrease is a credit-note concern. The 24-installment ceiling is checked before
+the money remainder, so a full schedule reports 409
+`MAX_INSTALLMENTS_REACHED`. `dueDate` is required and may not precede the policy
+effective date (the effective date itself is accepted, which allows an inception
+adjustment); `reason` is required, trimmed, and capped at 500 characters.
+
+The accepted command appends one DUE installment with the derived amount, the
+next installment number, and the supplied due date, then applies the plan change
+with one conditional UPDATE that requires the plan to still be ACTIVE and its
+`total_premium`/`installment_count` to equal the values the command read. A
+concurrent adjustment or closure loses that comparison and rolls the appended
+installment back; the `(plan_id, installment_number)` unique key is the second
+arbiter. The response is 201 with `{plan, installment, adjustmentAmount,
+newTotalPremium}`. The policy version bump and
+`policy.billing-plan.adjusted` (`policyId`, `policyNumber`, `planId`,
+`adjustmentAmount`, `newTotalPremium`, `installmentId`, `installmentNumber`,
+`dueDate`, `reason`) commit in the same transaction.
+
 ## Verification
 
 ```powershell
@@ -262,9 +294,9 @@ The live smoke is opt-in and requires PostgreSQL.
 
 ## Known SPEC gaps in this slice
 
-- Billing exposure starts with the plan, installment schedule, PAID/WAIVED
-  settlement required by this slice, dunning actions, and the tenant-wide
-  receivables read model. Plan `COMPLETE`/`CANCELLED` transitions, dunning
+- Billing exposure starts with the plan, installment schedule, positive premium
+  adjustment installments, PAID/WAIVED settlement required by this slice,
+  dunning actions, and the tenant-wide receivables read model. Plan `COMPLETE`/`CANCELLED` transitions, dunning
   cancellation/retry, billing instructions, and SAP AR reconciliation
   (SPEC 11.2.13) are not exposed yet.
 - Mass tort coverage blocks, occurrences, layers, forms, exclusions, rating
