@@ -20,6 +20,11 @@ import java.util.UUID;
  * against and is retained by a REVERSED note; it stays null for every other
  * status. {@code reversedAt} and {@code reversalReason} are written only by the
  * REVERSED transition.</p>
+ *
+ * <p>{@code cancellationId} links a return-premium note to the cancellation it
+ * refunds; it is null for a general billing adjustment. {@code cancellationNumber}
+ * is the linked cancellation's business reference and is null whenever the note
+ * has no cancellation link.</p>
  */
 public record PolicyCreditNote(
         UUID id,
@@ -35,14 +40,16 @@ public record PolicyCreditNote(
         UUID appliedInstallmentId,
         Instant createdAt,
         Instant reversedAt,
-        String reversalReason
+        String reversalReason,
+        UUID cancellationId,
+        String cancellationNumber
 ) {
     /** Legacy shape for a note that was not applied to a specific installment. */
     public PolicyCreditNote(UUID id, UUID tenantId, UUID policyId, String noteNumber,
                             BigDecimal amount, String currency, String reason, String status,
                             Instant issuedAt, Instant appliedAt, Instant createdAt) {
         this(id, tenantId, policyId, noteNumber, amount, currency, reason, status, issuedAt,
-                appliedAt, null, createdAt, null, null);
+                appliedAt, null, createdAt, null, null, null, null);
     }
 
     /**
@@ -55,7 +62,7 @@ public record PolicyCreditNote(
                             Instant issuedAt, Instant appliedAt, Instant createdAt,
                             UUID appliedInstallmentId) {
         this(id, tenantId, policyId, noteNumber, amount, currency, reason, status, issuedAt,
-                appliedAt, appliedInstallmentId, createdAt, null, null);
+                appliedAt, appliedInstallmentId, createdAt, null, null, null, null);
     }
 
     /** Shape for a transition that names an installment but predates reversal. */
@@ -64,6 +71,26 @@ public record PolicyCreditNote(
                             Instant issuedAt, Instant appliedAt, UUID appliedInstallmentId,
                             Instant createdAt) {
         this(id, tenantId, policyId, noteNumber, amount, currency, reason, status, issuedAt,
-                appliedAt, appliedInstallmentId, createdAt, null, null);
+                appliedAt, appliedInstallmentId, createdAt, null, null, null, null);
+    }
+
+    /** Shape for a transition that predates the cancellation link. */
+    public PolicyCreditNote(UUID id, UUID tenantId, UUID policyId, String noteNumber,
+                            BigDecimal amount, String currency, String reason, String status,
+                            Instant issuedAt, Instant appliedAt, UUID appliedInstallmentId,
+                            Instant createdAt, Instant reversedAt, String reversalReason) {
+        this(id, tenantId, policyId, noteNumber, amount, currency, reason, status, issuedAt,
+                appliedAt, appliedInstallmentId, createdAt, reversedAt, reversalReason, null, null);
+    }
+
+    /** Shape for a linked note whose cancellation number is read separately. */
+    public PolicyCreditNote(UUID id, UUID tenantId, UUID policyId, String noteNumber,
+                            BigDecimal amount, String currency, String reason, String status,
+                            Instant issuedAt, Instant appliedAt, UUID appliedInstallmentId,
+                            Instant createdAt, Instant reversedAt, String reversalReason,
+                            UUID cancellationId) {
+        this(id, tenantId, policyId, noteNumber, amount, currency, reason, status, issuedAt,
+                appliedAt, appliedInstallmentId, createdAt, reversedAt, reversalReason,
+                cancellationId, null);
     }
 }

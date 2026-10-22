@@ -27,6 +27,12 @@ final class CreditNoteRules {
     static final int MAX_REASON_LENGTH = 500;
     static final int CURRENCY_LENGTH = 3;
 
+    /**
+     * A cancellation return-premium note may differ from the computed return
+     * premium by at most one cent (SPEC money reconciliation tolerance).
+     */
+    static final BigDecimal CANCELLATION_AMOUNT_TOLERANCE = new BigDecimal("0.01");
+
     private static final Set<String> TARGETS = Set.of(ISSUED, APPLIED, CANCELLED, REVERSED);
 
     private CreditNoteRules() {
@@ -45,6 +51,42 @@ final class CreditNoteRules {
         String currency = normalizeCurrency(request.currency(), policy);
         String reason = normalizeReason(request.reason());
         return new CreditNoteSpec(amount, currency, reason);
+    }
+
+    /**
+     * Validates a return-premium note against the cancellation it refunds.
+     *
+     * <p>Only an ACTIVE cancellation may still fund a credit: a REINSTATED
+     * cancellation ended the refund and a VOID one never posted. The note must
+     * refund exactly the cancellation's computed return premium (within one
+     * cent) in the cancellation's currency, so a cancellation can never be
+     * over- or under-refunded through the credit-note surface.</p>
+     */
+    static void validateCancellationLink(CreditNoteSpec spec, PolicyCancellation cancellation) {
+        if (!CancellationRules.ACTIVE_STATUS.equals(cancellation.status())) {
+            throw PolicyErrors.conflict("CANCELLATION_NOT_ACTIVE", "cancellationId",
+                    "Cancellation " + cancellation.id() + " is " + cancellation.status()
+                            + " and cannot fund a credit note.",
+                    Map.of("cancellationId", cancellation.id().toString(),
+                            "currentStatus", cancellation.status()));
+        }
+        BigDecimal expected = Money.of(cancellation.returnPremiumAmount());
+        BigDecimal actual = Money.of(spec.amount());
+        if (expected == null || actual.subtract(expected).abs()
+                .compareTo(CANCELLATION_AMOUNT_TOLERANCE) > 0) {
+            throw PolicyErrors.badRequest("CREDIT_NOTE_AMOUNT_MISMATCH", "amount",
+                    "amount must equal the cancellation return premium "
+                            + (expected == null ? "(missing)" : expected.toPlainString())
+                            + " within 0.01.");
+        }
+        String cancellationCurrency = cancellation.premiumCurrency() == null
+                ? null : cancellation.premiumCurrency().trim().toUpperCase(Locale.ROOT);
+        if (cancellationCurrency == null || !cancellationCurrency.equals(spec.currency())) {
+            throw PolicyErrors.badRequest("CURRENCY_MISMATCH", "currency",
+                    "currency must match the cancellation premium currency "
+                            + (cancellationCurrency == null ? "(missing)" : cancellationCurrency)
+                            + ".");
+        }
     }
 
     /**

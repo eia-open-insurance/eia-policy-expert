@@ -23,10 +23,16 @@ import java.util.UUID;
 @Repository
 public class CreditNoteRepository {
     private static final String SELECT_COLUMNS = """
-            SELECT id, tenant_id, policy_id, note_number, amount, currency, reason, status,
-                   issued_at, applied_at, applied_installment_id, created_at, reversed_at,
-                   reversal_reason
-              FROM policy_credit_note
+            SELECT cn.id, cn.tenant_id, cn.policy_id, cn.note_number, cn.amount, cn.currency,
+                   cn.reason, cn.status, cn.issued_at, cn.applied_at, cn.applied_installment_id,
+                   cn.created_at, cn.reversed_at, cn.reversal_reason, cn.cancellation_id,
+                   COALESCE(pc.cancellation_number, CAST(pc.id AS VARCHAR))
+                       AS cancellation_number
+              FROM policy_credit_note cn
+              LEFT JOIN policy_cancellation pc
+                ON pc.tenant_id = cn.tenant_id
+               AND pc.policy_id = cn.policy_id
+               AND pc.id = cn.cancellation_id
             """;
 
     private static final RowMapper<PolicyCreditNote> MAPPER = (rs, rowNum) -> {
@@ -47,7 +53,9 @@ public class CreditNoteRepository {
                 rs.getObject("applied_installment_id", UUID.class),
                 rs.getTimestamp("created_at").toInstant(),
                 reversedAt == null ? null : reversedAt.toInstant(),
-                rs.getString("reversal_reason")
+                rs.getString("reversal_reason"),
+                rs.getObject("cancellation_id", UUID.class),
+                rs.getString("cancellation_number")
         );
     };
 
@@ -63,15 +71,27 @@ public class CreditNoteRepository {
      */
     public List<PolicyCreditNote> findAll(UUID tenantId, UUID policyId) {
         return jdbc.query(SELECT_COLUMNS + """
-                 WHERE tenant_id = ? AND policy_id = ?
-                 ORDER BY created_at DESC, note_number DESC
+                 WHERE cn.tenant_id = ? AND cn.policy_id = ?
+                 ORDER BY cn.created_at DESC, cn.note_number DESC
                 """, MAPPER, tenantId, policyId);
     }
 
     public Optional<PolicyCreditNote> findById(UUID tenantId, UUID policyId, UUID creditNoteId) {
         return jdbc.query(SELECT_COLUMNS + """
-                 WHERE tenant_id = ? AND policy_id = ? AND id = ?
+                 WHERE cn.tenant_id = ? AND cn.policy_id = ? AND cn.id = ?
                 """, MAPPER, tenantId, policyId, creditNoteId).stream().findFirst();
+    }
+
+    /**
+     * Tenant- and policy-scoped lookup of the note already linked to a
+     * cancellation. The unique constraint is the concurrency arbiter; this read
+     * turns the common duplicate into a friendly 409 before the insert.
+     */
+    public Optional<PolicyCreditNote> findByCancellation(UUID tenantId, UUID policyId,
+                                                         UUID cancellationId) {
+        return jdbc.query(SELECT_COLUMNS + """
+                 WHERE cn.tenant_id = ? AND cn.policy_id = ? AND cn.cancellation_id = ?
+                """, MAPPER, tenantId, policyId, cancellationId).stream().findFirst();
     }
 
     public void insert(PolicyCreditNote creditNote) {
@@ -79,8 +99,8 @@ public class CreditNoteRepository {
                 INSERT INTO policy_credit_note
                        (id, tenant_id, policy_id, note_number, amount, currency, reason, status,
                         issued_at, applied_at, applied_installment_id, created_at, reversed_at,
-                        reversal_reason)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        reversal_reason, cancellation_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, creditNote.id(), creditNote.tenantId(), creditNote.policyId(),
                 creditNote.noteNumber(), creditNote.amount(), creditNote.currency(),
                 creditNote.reason(), creditNote.status(),
@@ -89,7 +109,8 @@ public class CreditNoteRepository {
                 creditNote.appliedInstallmentId(),
                 Timestamp.from(creditNote.createdAt()),
                 creditNote.reversedAt() == null ? null : Timestamp.from(creditNote.reversedAt()),
-                creditNote.reversalReason());
+                creditNote.reversalReason(),
+                creditNote.cancellationId());
     }
 
     /**

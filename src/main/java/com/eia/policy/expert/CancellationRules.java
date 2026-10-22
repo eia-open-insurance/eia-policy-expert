@@ -13,6 +13,9 @@ import java.util.UUID;
  * reinstatement.
  */
 public final class CancellationRules {
+    /** The final status of a cancellation that has not been reinstated or voided. */
+    public static final String ACTIVE_STATUS = "ACTIVE";
+
     public static final Set<String> TYPES = Set.of(
             "FLAT", "PRO_RATA", "SHORT_RATE", "NON_PAYMENT", "VOID"
     );

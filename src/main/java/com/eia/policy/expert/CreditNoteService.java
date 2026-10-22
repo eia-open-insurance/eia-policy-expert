@@ -3,6 +3,7 @@ package com.eia.policy.expert;
 import com.eia.platform.libs.outbox.OutboxEvent;
 import com.eia.platform.libs.outbox.OutboxRepository;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -11,6 +12,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -36,6 +38,7 @@ import java.util.UUID;
 public class CreditNoteService {
     private final PolicyRepository policyRepository;
     private final CreditNoteRepository creditNoteRepository;
+    private final CancellationRepository cancellationRepository;
     private final BillingRepository billingRepository;
     private final OutboxRepository outbox;
     private final Clock clock;
@@ -43,18 +46,21 @@ public class CreditNoteService {
     @Autowired
     public CreditNoteService(PolicyRepository policyRepository,
                              CreditNoteRepository creditNoteRepository,
+                             CancellationRepository cancellationRepository,
                              BillingRepository billingRepository,
                              OutboxRepository outbox) {
-        this(policyRepository, creditNoteRepository, billingRepository, outbox,
-                Clock.systemUTC());
+        this(policyRepository, creditNoteRepository, cancellationRepository, billingRepository,
+                outbox, Clock.systemUTC());
     }
 
     CreditNoteService(PolicyRepository policyRepository,
                       CreditNoteRepository creditNoteRepository,
+                      CancellationRepository cancellationRepository,
                       BillingRepository billingRepository,
                       OutboxRepository outbox, Clock clock) {
         this.policyRepository = policyRepository;
         this.creditNoteRepository = creditNoteRepository;
+        this.cancellationRepository = cancellationRepository;
         this.billingRepository = billingRepository;
         this.outbox = outbox;
         this.clock = clock;
@@ -68,21 +74,52 @@ public class CreditNoteService {
 
     /**
      * Creates a DRAFT credit note. Validation runs before the note number is
-     * consumed, so a rejected body never burns a number. Creation itself is not
-     * one of the lifecycle events: only ISSUED, APPLIED, CANCELLED, and REVERSED
-     * emit an outbox event.
+     * consumed, so a rejected body never burns a number.
+     *
+     * <p>When the request names a {@code cancellationId}, the cancellation is
+     * resolved on the same tenant and policy (otherwise 404), must still be
+     * ACTIVE (otherwise 409), and must match the note amount within one cent and
+     * the note currency exactly (otherwise 400). A cancellation can fund at most
+     * one note: a duplicate is 409 {@code DUPLICATE_CANCELLATION_CREDIT_NOTE},
+     * and the unique key on {@code (tenant_id, policy_id, cancellation_id)} also
+     * arbitrates a concurrent duplicate. The accepted create writes
+     * {@code policy.credit-note.created} in the same transaction as the note row
+     * and the policy-version bump; the event carries the cancellation identity
+     * when the note is linked.</p>
      */
     @Transactional
     public PolicyCreditNote create(UUID tenantId, UUID policyId,
                                    CreateCreditNoteRequest request) {
         Policy policy = requirePolicy(tenantId, policyId);
         CreditNoteRules.CreditNoteSpec spec = CreditNoteRules.validateCreate(request, policy);
+        UUID cancellationId = request.cancellationId();
+        PolicyCancellation cancellation = null;
+        if (cancellationId != null) {
+            cancellation = cancellationRepository.findCancellation(tenantId, policyId,
+                            cancellationId)
+                    .orElseThrow(() -> cancellationNotFound(cancellationId));
+            creditNoteRepository.findByCancellation(tenantId, policyId, cancellationId)
+                    .ifPresent(existing -> {
+                        throw duplicateCancellation(cancellationId, existing);
+                    });
+            CreditNoteRules.validateCancellationLink(spec, cancellation);
+        }
         Instant now = Instant.now(clock).truncatedTo(ChronoUnit.MICROS);
         PolicyCreditNote creditNote = new PolicyCreditNote(UUID.randomUUID(), tenantId, policyId,
                 creditNoteRepository.nextNoteNumber(), spec.amount(), spec.currency(),
-                spec.reason(), CreditNoteRules.DRAFT, null, null, null, now, null, null);
-        creditNoteRepository.insert(creditNote);
-        touch(policy);
+                spec.reason(), CreditNoteRules.DRAFT, null, null, null, now, null, null,
+                cancellationId, cancellationNumber(cancellation));
+        try {
+            creditNoteRepository.insert(creditNote);
+        } catch (DuplicateKeyException ex) {
+            if (cancellationId != null) {
+                throw duplicateCancellation(cancellationId, null);
+            }
+            throw ex;
+        }
+        Policy touched = touch(policy);
+        outbox.insert(OutboxEvent.fromEnvelope(
+                PolicyEvents.creditNoteCreated(touched, creditNote, now)));
         return creditNote;
     }
 
@@ -238,6 +275,37 @@ public class CreditNoteService {
     private static ApiException installmentNotFound(UUID installmentId) {
         return PolicyErrors.notFound("INSTALLMENT_NOT_FOUND", "installmentId",
                 "Installment not found: " + installmentId);
+    }
+
+    /** A cancellation from another tenant or policy is indistinguishable from a missing one. */
+    private static ApiException cancellationNotFound(UUID cancellationId) {
+        return PolicyErrors.notFound("CANCELLATION_NOT_FOUND", "cancellationId",
+                "Cancellation not found: " + cancellationId);
+    }
+
+    /**
+     * The cancellation business number, falling back to the row id for a
+     * historical cancellation that predates numbering. The read join applies the
+     * same fallback, so create, list, and the created event agree.
+     */
+    private static String cancellationNumber(PolicyCancellation cancellation) {
+        if (cancellation == null) {
+            return null;
+        }
+        return cancellation.cancellationNumber() == null
+                ? cancellation.id().toString() : cancellation.cancellationNumber();
+    }
+
+    private static ApiException duplicateCancellation(UUID cancellationId,
+                                                      PolicyCreditNote existing) {
+        Map<String, Object> meta = new LinkedHashMap<>();
+        meta.put("cancellationId", cancellationId.toString());
+        if (existing != null) {
+            meta.put("creditNoteId", existing.id().toString());
+            meta.put("noteNumber", existing.noteNumber());
+        }
+        return PolicyErrors.conflict("DUPLICATE_CANCELLATION_CREDIT_NOTE", "cancellationId",
+                "A credit note already exists for cancellation " + cancellationId + ".", meta);
     }
 
     private Policy touch(Policy policy) {

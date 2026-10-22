@@ -133,7 +133,8 @@ public class CancellationService {
                 request.noticeDays() == null ? 0 : request.noticeDays(), now,
                 amounts.termDays(), amounts.remainingDays(), amounts.proRataPct(),
                 amounts.earnedPremium(), amounts.returnPremium(), policy.premiumCurrency(),
-                request.approvalRef(), request.approvedBy(), "ACTIVE", now);
+                request.approvalRef(), request.approvedBy(), "ACTIVE", now,
+                cancellationRepository.nextCancellationNumber());
         cancellationRepository.insertCancellation(cancellation);
         Policy updated = policyRepository.updateStatus(tenantId, policyId, "CANCELLED",
                 request.reason().trim(), policy.version());

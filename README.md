@@ -37,8 +37,8 @@ contract structures from SPEC 11.2:
   country, and location codes. At least one ACTIVE named insured is required
   before `ISSUED`.
 - `policy_cancellation` and `policy_reinstatement`: notice, reason, effective
-  date, pro-rata return premium, and a reinstatement gate that requires an
-  approval and documented premium evidence.
+  date, a per-policy `cancellation_number`, pro-rata return premium, and a
+  reinstatement gate that requires an approval and documented premium evidence.
 - `policy_billing_plan` and `policy_installment`: one ACTIVE plan per policy,
   an equal premium split across 1..24 installments with the rounding remainder
   on the last row, PAID/WAIVED settlement, and credit application through
@@ -52,9 +52,11 @@ contract structures from SPEC 11.2:
 - `policy_credit_note`: policy billing adjustments with a positive
   `numeric(19,4)` amount in the policy currency, an optional 500-character
   reason, a per-policy unique `note_number`, and the DRAFT/ISSUED/APPLIED/
-  CANCELLED lifecycle with `issued_at`/`applied_at` stamped by the transition
-  that reaches each state. `applied_installment_id` names the open installment
-  an APPLIED note was credited against.
+  CANCELLED/REVERSED lifecycle with `issued_at`/`applied_at` stamped by the
+  transition that reaches each state. `applied_installment_id` names the open
+  installment an APPLIED note was credited against. A nullable `cancellation_id`
+  links a return-premium note to the one cancellation it refunds, unique per
+  tenant/policy when present.
 - `policy_mass_tort_profile`: one profile per policy carrying the tort type,
   trigger theory, allocation method/notes, an inclusive coverage block, and
   DRAFT/COMPLETE status. A COMPLETE profile requires the notes and both block
@@ -78,8 +80,9 @@ contract structures from SPEC 11.2:
   each covered mutation (`created`, `updated`, `version-issued`, `endorsed`,
   `cancelled`, `reinstated`, `renewed`, `billing-plan.created`, `installment.paid`,
   `installment.waived`, `dunning.sent`, `mass-tort-profile.updated`,
-  `credit-note.issued`, `credit-note.applied`, `credit-note.cancelled`,
-  `program.created`, `policy.program-assigned`, `legal-entity.created`,
+  `credit-note.created`, `credit-note.issued`, `credit-note.applied`,
+  `credit-note.cancelled`, `credit-note.reversed`, `program.created`,
+  `policy.program-assigned`, `legal-entity.created`,
   `policy.legal-entity-assigned`), with conditional Quartz HTTP dispatch.
 
 Every second-slice mutation accepts an optional `If-Match` strong entity tag
@@ -244,14 +247,25 @@ same controller keeps the `/internal/v1` alias for the domain adapter):
 | `POST` | `/api/v1/policies/{policyId}/credit-notes` | Create a `DRAFT` note; `201` |
 | `PATCH` | `/api/v1/policies/{policyId}/credit-notes/{creditNoteId}/status` | Transition to `ISSUED`, `APPLIED`, or `CANCELLED`; `409` for an out-of-order or terminal transition |
 
-The create body is `{amount, currency, reason?}`. `amount` must be greater than
-zero, `currency` must match the policy premium currency (case-insensitive,
-stored upper-case), and `reason` is optional, trimmed, and capped at 500
-characters. The tenant comes from `?tenantId=` or `X-EIA-Tenant`, and the route
-is fixed to the DIRECT book. A new note is `DRAFT`; `DRAFT` may move to `ISSUED`
-or `CANCELLED`, `ISSUED` may move to `APPLIED` or `CANCELLED`, and `APPLIED` /
-`CANCELLED` are terminal. `ISSUED` stamps `issuedAt`, `APPLIED` stamps
-`appliedAt` and `appliedInstallmentId`, and `CANCELLED` stamps neither.
+The create body is `{amount, currency, reason?, cancellationId?}`. `amount` must
+be greater than zero, `currency` must match the policy premium currency
+(case-insensitive, stored upper-case), and `reason` is optional, trimmed, and
+capped at 500 characters. The tenant comes from `?tenantId=` or `X-EIA-Tenant`,
+and the route is fixed to the DIRECT book. A new note is `DRAFT`; `DRAFT` may
+move to `ISSUED` or `CANCELLED`, `ISSUED` may move to `APPLIED` or `CANCELLED`,
+and `APPLIED` / `CANCELLED` are terminal. `ISSUED` stamps `issuedAt`, `APPLIED`
+stamps `appliedAt` and `appliedInstallmentId`, and `CANCELLED` stamps neither.
+
+Supplying `cancellationId` makes the note a cancellation return-premium credit.
+The cancellation must belong to the same tenant and policy (`404
+CANCELLATION_NOT_FOUND`), be `ACTIVE` (`409 CANCELLATION_NOT_ACTIVE`), and have
+an `amount` within one cent of its return premium with the same currency
+(`400 CREDIT_NOTE_AMOUNT_MISMATCH` / `400 CURRENCY_MISMATCH`). A cancellation can
+fund at most one note: a duplicate is `409 DUPLICATE_CANCELLATION_CREDIT_NOTE`,
+enforced by the unique `(tenant_id, policy_id, cancellation_id)` key. The
+response carries `cancellationId` and `cancellationNumber`; the number is the
+per-policy `CX-{7 digits}` reference, or the cancellation id for a legacy row
+that predates numbering.
 
 The status body is `{status, installmentId?}`. `installmentId` is required for
 `APPLIED`: the installment must belong to the same tenant and policy, still be
@@ -262,8 +276,13 @@ the credits reach the gross amount and stays open after a partial credit.
 Overpayment is `409 CREDIT_NOTE_EXCEEDS_INSTALLMENT`, a settled/credited target
 is `409 INSTALLMENT_NOT_CREDITABLE`, and a missing `installmentId` is
 `400 INVALID_CREDIT_NOTE_INSTALLMENT`. `ISSUED` and `CANCELLED` ignore the
-optional field.
+optional field. `REVERSED` is reachable only from `APPLIED`, requires a reason,
+and is covered below.
 
+Creating a note bumps the policy aggregate version and writes
+`policy.credit-note.created` (`policyId`, `policyNumber`, `creditNoteId`,
+`noteNumber`, `amount`, `currency`, `status`, `createdAt`) in the same
+transaction. A linked note adds `cancellationId` and `cancellationNumber`.
 Every accepted transition bumps the policy aggregate version and writes
 `policy.credit-note.issued`, `policy.credit-note.applied`, or
 `policy.credit-note.cancelled` (`policyId`, `policyNumber`, `creditNoteId`,

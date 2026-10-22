@@ -218,6 +218,30 @@ class CreditNoteRulesTest {
     }
 
     @Test
+    void validatesAReturnPremiumNoteAgainstItsCancellation() {
+        CreditNoteRules.CreditNoteSpec exact = spec("60164.4000", "USD");
+        CreditNoteRules.validateCancellationLink(exact, cancellation("ACTIVE", "60164.4000",
+                "USD"));
+        CreditNoteRules.validateCancellationLink(spec("60164.4100", "USD"),
+                cancellation("ACTIVE", "60164.4000", "USD"));
+        CreditNoteRules.validateCancellationLink(spec("60164.3900", "USD"),
+                cancellation("ACTIVE", "60164.4000", "USD"));
+
+        assertBadRequest(() -> CreditNoteRules.validateCancellationLink(
+                spec("60164.4200", "USD"), cancellation("ACTIVE", "60164.4000", "USD")),
+                "CREDIT_NOTE_AMOUNT_MISMATCH");
+        assertBadRequest(() -> CreditNoteRules.validateCancellationLink(
+                spec("60164.4000", "EUR"), cancellation("ACTIVE", "60164.4000", "USD")),
+                "CURRENCY_MISMATCH");
+        assertConflict(() -> CreditNoteRules.validateCancellationLink(
+                spec("60164.4000", "USD"), cancellation("REINSTATED", "60164.4000", "USD")),
+                "CANCELLATION_NOT_ACTIVE");
+        assertConflict(() -> CreditNoteRules.validateCancellationLink(
+                spec("60164.4000", "USD"), cancellation("VOID", "60164.4000", "USD")),
+                "CANCELLATION_NOT_ACTIVE");
+    }
+
+    @Test
     void applyingRequiresAnInstallmentAndAnOpenRow() {
         assertBadRequest(() -> CreditNoteRules.requireInstallmentId(null),
                 "INVALID_CREDIT_NOTE_INSTALLMENT");
@@ -266,6 +290,19 @@ class CreditNoteRulesTest {
         return new PolicyInstallment(UUID.randomUUID(), TENANT, POLICY_ID, 1, dueDate,
                 new BigDecimal(amount), new BigDecimal(creditedAmount), status, null, null,
                 Instant.parse("2026-01-01T00:00:00Z"));
+    }
+
+    private static CreditNoteRules.CreditNoteSpec spec(String amount, String currency) {
+        return new CreditNoteRules.CreditNoteSpec(new BigDecimal(amount), currency, null);
+    }
+
+    private static PolicyCancellation cancellation(String status, String returnPremium,
+                                                  String currency) {
+        Instant now = Instant.parse("2026-07-02T00:00:00Z");
+        return new PolicyCancellation(UUID.randomUUID(), TENANT, POLICY_ID, UUID.randomUUID(),
+                "PRO_RATA", "Insured sold the business", LocalDate.of(2026, 7, 2), 0, now,
+                365, 183, new BigDecimal("0.501370"), new BigDecimal("59835.6000"),
+                new BigDecimal(returnPremium), currency, null, null, status, now);
     }
 
     private static Policy policy() {

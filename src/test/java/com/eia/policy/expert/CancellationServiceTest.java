@@ -51,6 +51,7 @@ class CancellationServiceTest {
         Policy cancelled = policy("CANCELLED", 5);
         when(guard.requirePolicy(TENANT, POLICY_ID, "\"4\"")).thenReturn(policy);
         when(versionService.currentOrNull(TENANT, POLICY_ID)).thenReturn(version());
+        when(cancellationRepository.nextCancellationNumber()).thenReturn("CX-0000001");
         when(policyRepository.updateStatus(TENANT, POLICY_ID, "CANCELLED", "Insured sold the business",
                 4)).thenReturn(cancelled);
         when(policyRepository.findById(TENANT, POLICY_ID)).thenReturn(Optional.of(cancelled));
@@ -61,6 +62,7 @@ class CancellationServiceTest {
 
         assertThat(result.replayed()).isFalse();
         assertThat(result.cancellation().cancellationType()).isEqualTo("PRO_RATA");
+        assertThat(result.cancellation().cancellationNumber()).isEqualTo("CX-0000001");
         assertThat(result.cancellation().termDays()).isEqualTo(365);
         assertThat(result.cancellation().remainingDays()).isEqualTo(183);
         assertThat(result.cancellation().returnPremiumAmount()).isEqualByComparingTo("60164.4000");

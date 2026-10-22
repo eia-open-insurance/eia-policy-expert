@@ -46,6 +46,7 @@ final class PolicyEvents {
     static final String INSTALLMENT_PAID = "policy.installment.paid";
     static final String INSTALLMENT_WAIVED = "policy.installment.waived";
     static final String DUNNING_SENT = "policy.dunning.sent";
+    static final String CREDIT_NOTE_CREATED = "policy.credit-note.created";
     static final String CREDIT_NOTE_ISSUED = "policy.credit-note.issued";
     static final String CREDIT_NOTE_APPLIED = "policy.credit-note.applied";
     static final String CREDIT_NOTE_CANCELLED = "policy.credit-note.cancelled";
@@ -92,6 +93,34 @@ final class PolicyEvents {
                 ? List.of()
                 : installments.stream().map(PolicyEvents::installmentData).toList());
         return envelope(policy, BILLING_PLAN_CREATED, data, now);
+    }
+
+    /**
+     * A DRAFT credit note is a policy aggregate change: the payload carries the
+     * policy and note identity, the money value, the creation instant, and the
+     * initial DRAFT status. When the note refunds a cancellation, the payload
+     * also carries {@code cancellationId} and {@code cancellationNumber} so a
+     * receivables consumer can reconcile the return premium without a second
+     * read. An unlinked billing adjustment omits both members.
+     */
+    static EventEnvelope creditNoteCreated(Policy policy, PolicyCreditNote creditNote,
+                                           Instant now) {
+        Objects.requireNonNull(creditNote, "creditNote");
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("policyId", policy.id());
+        data.put("policyNumber", policy.policyNumber());
+        data.put("creditNoteId", creditNote.id());
+        data.put("noteNumber", creditNote.noteNumber());
+        data.put("amount", money(creditNote.amount()));
+        data.put("currency", creditNote.currency());
+        data.put("status", creditNote.status());
+        data.put("createdAt", instant(creditNote.createdAt()));
+        if (creditNote.cancellationId() != null) {
+            data.put("cancellationId", creditNote.cancellationId());
+            data.put("cancellationNumber", creditNote.cancellationNumber() == null
+                    ? NullNode.getInstance() : creditNote.cancellationNumber());
+        }
+        return envelope(policy, CREDIT_NOTE_CREATED, data, now);
     }
 
     /**

@@ -13,10 +13,10 @@ import java.util.UUID;
 @Repository
 public class CancellationRepository {
     private static final String CANCELLATION_COLUMNS = """
-            SELECT id, tenant_id, policy_id, policy_version_id, cancellation_type, reason,
-                   effective_date, notice_days, noticed_at, term_days, remaining_days,
-                   pro_rata_pct, earned_premium_amount, return_premium_amount, premium_currency,
-                   approval_ref, approved_by, status, created_at
+            SELECT id, tenant_id, policy_id, policy_version_id, cancellation_number,
+                   cancellation_type, reason, effective_date, notice_days, noticed_at, term_days,
+                   remaining_days, pro_rata_pct, earned_premium_amount, return_premium_amount,
+                   premium_currency, approval_ref, approved_by, status, created_at
               FROM policy_cancellation
             """;
 
@@ -40,7 +40,8 @@ public class CancellationRepository {
                     rs.getObject("approval_ref", UUID.class),
                     rs.getObject("approved_by", UUID.class),
                     rs.getString("status"),
-                    rs.getTimestamp("created_at").toInstant()
+                    rs.getTimestamp("created_at").toInstant(),
+                    rs.getString("cancellation_number")
             );
 
     private static final String REINSTATEMENT_COLUMNS = """
@@ -77,14 +78,16 @@ public class CancellationRepository {
     public void insertCancellation(PolicyCancellation cancellation) {
         jdbc.update("""
                 INSERT INTO policy_cancellation
-                       (id, tenant_id, policy_id, policy_version_id, cancellation_type, reason,
-                        effective_date, notice_days, noticed_at, term_days, remaining_days,
-                        pro_rata_pct, earned_premium_amount, return_premium_amount,
-                        premium_currency, approval_ref, approved_by, status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       (id, tenant_id, policy_id, policy_version_id, cancellation_number,
+                        cancellation_type, reason, effective_date, notice_days, noticed_at,
+                        term_days, remaining_days, pro_rata_pct, earned_premium_amount,
+                        return_premium_amount, premium_currency, approval_ref, approved_by,
+                        status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, cancellation.id(), cancellation.tenantId(), cancellation.policyId(),
-                cancellation.policyVersionId(), cancellation.cancellationType(),
-                cancellation.reason(), cancellation.effectiveDate(), cancellation.noticeDays(),
+                cancellation.policyVersionId(), cancellation.cancellationNumber(),
+                cancellation.cancellationType(), cancellation.reason(),
+                cancellation.effectiveDate(), cancellation.noticeDays(),
                 Timestamp.from(cancellation.noticedAt()), cancellation.termDays(),
                 cancellation.remainingDays(), cancellation.proRataPct(),
                 cancellation.earnedPremiumAmount(), cancellation.returnPremiumAmount(),
@@ -119,6 +122,17 @@ public class CancellationRepository {
                    SET status = 'REINSTATED'
                  WHERE tenant_id = ? AND policy_id = ? AND id = ? AND status = 'ACTIVE'
                 """, tenantId, policyId, cancellationId);
+    }
+
+    /**
+     * Server-generated cancellation number, unique per policy because the
+     * sequence is global. The fixed width keeps ordering aligned with time.
+     */
+    public String nextCancellationNumber() {
+        Long sequence = jdbc.queryForObject(
+                "SELECT nextval('policy_cancellation_number_seq')", Long.class);
+        long value = sequence == null ? 1L : sequence;
+        return "CX-" + String.format("%07d", value);
     }
 
     public void insertReinstatement(PolicyReinstatement reinstatement) {

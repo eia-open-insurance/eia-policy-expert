@@ -153,6 +153,27 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   `installmentId`, `amount`, `reason`, `status`) written in the same transaction
   as the reversal and policy version bump; billing summaries and receivables
   reflect the restored credit.
+- Cancellation return-premium credit notes: nullable
+  `policy_credit_note.cancellation_id` with idempotent DDL and the
+  `uq_policy_credit_note_cancellation` unique key
+  (`(tenant_id, policy_id, cancellation_id)`), so an unlinked note stays
+  valid while a cancellation funds at most one note.
+- `CreateCreditNoteRequest` accepts an optional `cancellationId`. The
+  cancellation is resolved on the same tenant/policy (`404
+  CANCELLATION_NOT_FOUND`), must still be `ACTIVE` (`409
+  CANCELLATION_NOT_ACTIVE`), and its return premium must match the note amount
+  within 0.01 in the same currency (`400 CREDIT_NOTE_AMOUNT_MISMATCH` / `400
+  CURRENCY_MISMATCH`). A duplicate link is `409
+  DUPLICATE_CANCELLATION_CREDIT_NOTE`.
+- `CreditNote` exposes `cancellationId` and `cancellationNumber`; the new
+  additive `policy_cancellation.cancellation_number` is a per-policy
+  `CX-{7 digits}` reference generated from
+  `policy_cancellation_number_seq` (the cancellation id is the fallback for a
+  legacy row without a number).
+- `policy.credit-note.created` outbox event (`policyId`, `policyNumber`,
+  `creditNoteId`, `noteNumber`, `amount`, `currency`, `status`, `createdAt`)
+  written in the same transaction as the note and policy version bump; a linked
+  note adds `cancellationId` and `cancellationNumber`.
 
 ### Changed
 

@@ -15,6 +15,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
+import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -28,7 +29,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /**
  * End-to-end credit note slice against H2: create/list ordering, the
  * DRAFT/ISSUED/APPLIED/CANCELLED graph, timestamps, validation, tenant wall,
- * outbox payloads, and transactional rollback.
+ * outbox payloads, transactional rollback, and cancellation return-premium
+ * links (amount/currency checks, duplicate arbitration, and event payload).
  */
 @SpringBootTest
 @ActiveProfiles("test")
@@ -48,6 +50,9 @@ class CreditNoteServiceTest {
 
     @Autowired
     private BillingService billingService;
+
+    @Autowired
+    private CancellationService cancellationService;
 
     @Autowired
     private JdbcTemplate jdbc;
@@ -93,12 +98,200 @@ class CreditNoteServiceTest {
         assertThat(note.issuedAt()).isNull();
         assertThat(note.appliedAt()).isNull();
         assertThat(note.createdAt()).isNotNull();
+        assertThat(note.cancellationId()).isNull();
+        assertThat(note.cancellationNumber()).isNull();
         assertThat(creditNoteService.list(TENANT, policy.id())).containsExactly(note);
         assertThat(policyService.get(TENANT, policy.id()).version())
                 .isEqualTo(policy.version() + 1);
+        assertThat(countEvents("policy.credit-note.created")).isEqualTo(1);
         assertThat(countEvents("policy.credit-note.issued")).isZero();
         assertThat(countEvents("policy.credit-note.applied")).isZero();
         assertThat(countEvents("policy.credit-note.cancelled")).isZero();
+
+        String payload =
+                (String) event("policy.credit-note.created", policy.id()).get("payload");
+        assertThat(payload)
+                .contains("\"creditNoteId\":\"" + note.id() + "\"")
+                .contains("\"status\":\"DRAFT\"")
+                .doesNotContain("cancellationId")
+                .doesNotContain("cancellationNumber");
+    }
+
+    @Test
+    void createsAReturnPremiumCreditNoteLinkedToTheCancellation() {
+        PolicyCancellation cancellation = createCancellation("POL-CN-LINK-0001");
+
+        PolicyCreditNote note = creditNoteService.create(TENANT, cancellation.policyId(),
+                new CreateCreditNoteRequest(cancellation.returnPremiumAmount(), "usd",
+                        "cancellation return premium", cancellation.id()));
+
+        assertThat(note.status()).isEqualTo("DRAFT");
+        assertThat(note.cancellationId()).isEqualTo(cancellation.id());
+        assertThat(note.cancellationNumber()).isEqualTo(cancellation.cancellationNumber());
+        assertThat(note.cancellationNumber()).matches("CX-\\d{7}");
+        assertThat(note.amount()).isEqualByComparingTo(cancellation.returnPremiumAmount());
+        assertThat(note.currency()).isEqualTo(cancellation.premiumCurrency());
+
+        UUID storedCancellationId = jdbc.queryForObject(
+                "SELECT cancellation_id FROM policy_credit_note WHERE id = ?",
+                UUID.class, note.id());
+        assertThat(storedCancellationId).isEqualTo(cancellation.id());
+
+        String payload = (String) event("policy.credit-note.created", cancellation.policyId())
+                .get("payload");
+        assertThat(payload)
+                .contains("\"creditNoteId\":\"" + note.id() + "\"")
+                .contains("\"status\":\"DRAFT\"")
+                .contains("\"cancellationId\":\"" + cancellation.id() + "\"")
+                .contains("\"cancellationNumber\":\"" + cancellation.cancellationNumber() + "\"");
+    }
+
+    @Test
+    void fallsBackToTheCancellationIdForALegacyCancellationWithoutANumber() {
+        PolicyCancellation cancellation = createCancellation("POL-CN-LINK-0008");
+        jdbc.update("UPDATE policy_cancellation SET cancellation_number = NULL WHERE id = ?",
+                cancellation.id());
+
+        PolicyCreditNote note = creditNoteService.create(TENANT, cancellation.policyId(),
+                new CreateCreditNoteRequest(cancellation.returnPremiumAmount(), "USD",
+                        "legacy cancellation refund", cancellation.id()));
+
+        assertThat(note.cancellationId()).isEqualTo(cancellation.id());
+        assertThat(note.cancellationNumber()).isEqualTo(cancellation.id().toString());
+        assertThat(creditNoteService.list(TENANT, cancellation.policyId()).getFirst()
+                .cancellationNumber()).isEqualTo(cancellation.id().toString());
+    }
+
+    @Test
+    void rejectsADuplicateCreditNoteForTheSameCancellation() {
+        PolicyCancellation cancellation = createCancellation("POL-CN-LINK-0002");
+        CreateCreditNoteRequest request = new CreateCreditNoteRequest(
+                cancellation.returnPremiumAmount(), "USD", "cancellation return premium",
+                cancellation.id());
+        PolicyCreditNote first = creditNoteService.create(TENANT, cancellation.policyId(),
+                request);
+
+        // The duplicate link wins even when the retried body is different: the
+        // cancellation is already fully refunded.
+        assertThatThrownBy(() -> creditNoteService.create(TENANT, cancellation.policyId(),
+                new CreateCreditNoteRequest(cancellation.returnPremiumAmount()
+                        .add(BigDecimal.ONE), "USD", "different body", cancellation.id())))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException api = (ApiException) ex;
+                    assertThat(api.status()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(api.code()).isEqualTo("DUPLICATE_CANCELLATION_CREDIT_NOTE");
+                    assertThat(api.meta())
+                            .containsEntry("cancellationId", cancellation.id().toString())
+                            .containsEntry("creditNoteId", first.id().toString());
+                });
+
+        assertThatThrownBy(() -> creditNoteService.create(TENANT, cancellation.policyId(),
+                request))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException api = (ApiException) ex;
+                    assertThat(api.status()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(api.code()).isEqualTo("DUPLICATE_CANCELLATION_CREDIT_NOTE");
+                });
+
+        assertThat(creditNoteService.list(TENANT, cancellation.policyId())).hasSize(1);
+        assertThat(countEvents("policy.credit-note.created")).isEqualTo(1);
+    }
+
+    @Test
+    void linkedCreateRollbackLeavesNoNoteLinkOrEvent() {
+        PolicyCancellation cancellation = createCancellation("POL-CN-LINK-0009");
+        int versionBefore = policyService.get(TENANT, cancellation.policyId()).version();
+
+        assertThatThrownBy(() -> transaction.executeWithoutResult(status -> {
+            creditNoteService.create(TENANT, cancellation.policyId(),
+                    new CreateCreditNoteRequest(cancellation.returnPremiumAmount(), "USD",
+                            "rollback", cancellation.id()));
+            throw new IllegalStateException("force rollback");
+        })).isInstanceOf(IllegalStateException.class)
+                .hasMessage("force rollback");
+
+        assertThat(creditNoteService.list(TENANT, cancellation.policyId())).isEmpty();
+        assertThat(countEvents("policy.credit-note.created")).isZero();
+        assertThat(policyService.get(TENANT, cancellation.policyId()).version())
+                .isEqualTo(versionBefore);
+    }
+
+    @Test
+    void rejectsAnAmountThatDoesNotMatchTheCancellationReturnPremium() {
+        PolicyCancellation cancellation = createCancellation("POL-CN-LINK-0003");
+        BigDecimal twoCentsOver = cancellation.returnPremiumAmount()
+                .add(new BigDecimal("0.02"));
+
+        assertBadRequest(() -> creditNoteService.create(TENANT, cancellation.policyId(),
+                        new CreateCreditNoteRequest(twoCentsOver, "USD", "cancellation refund",
+                                cancellation.id())),
+                "CREDIT_NOTE_AMOUNT_MISMATCH");
+        assertThat(creditNoteService.list(TENANT, cancellation.policyId())).isEmpty();
+        assertThat(countEvents("policy.credit-note.created")).isZero();
+
+        PolicyCreditNote withinTolerance = creditNoteService.create(TENANT,
+                cancellation.policyId(),
+                new CreateCreditNoteRequest(cancellation.returnPremiumAmount()
+                        .add(new BigDecimal("0.01")), "USD", "cancellation refund",
+                        cancellation.id()));
+        assertThat(withinTolerance.amount()).isEqualByComparingTo(
+                cancellation.returnPremiumAmount().add(new BigDecimal("0.01")));
+    }
+
+    @Test
+    void rejectsACurrencyThatDoesNotMatchTheCancellation() {
+        PolicyCancellation cancellation = createCancellation("POL-CN-LINK-0004");
+        // Simulate a legacy cancellation whose premium currency differs from
+        // the policy currency, so only the cancellation-level comparison fails.
+        jdbc.update("UPDATE policy_cancellation SET premium_currency = 'EUR' WHERE id = ?",
+                cancellation.id());
+
+        assertBadRequest(() -> creditNoteService.create(TENANT, cancellation.policyId(),
+                        new CreateCreditNoteRequest(cancellation.returnPremiumAmount(), "USD",
+                                "cancellation refund", cancellation.id())),
+                "CURRENCY_MISMATCH");
+        assertThat(creditNoteService.list(TENANT, cancellation.policyId())).isEmpty();
+    }
+
+    @Test
+    void rejectsAnInactiveCancellation() {
+        PolicyCancellation cancellation = createCancellation("POL-CN-LINK-0005");
+        jdbc.update("UPDATE policy_cancellation SET status = 'REINSTATED' WHERE id = ?",
+                cancellation.id());
+
+        assertThatThrownBy(() -> creditNoteService.create(TENANT, cancellation.policyId(),
+                new CreateCreditNoteRequest(cancellation.returnPremiumAmount(), "USD",
+                        "cancellation refund", cancellation.id())))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException api = (ApiException) ex;
+                    assertThat(api.status()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(api.code()).isEqualTo("CANCELLATION_NOT_ACTIVE");
+                    assertThat(api.meta())
+                            .containsEntry("currentStatus", "REINSTATED");
+                });
+        assertThat(countEvents("policy.credit-note.created")).isZero();
+    }
+
+    @Test
+    void rejectsACancellationFromAnotherPolicyTenantOrAnUnknownId() {
+        PolicyCancellation cancellation = createCancellation("POL-CN-LINK-0006");
+        Policy otherPolicy = createPolicy("POL-CN-LINK-0007", new BigDecimal("90000.00"));
+
+        assertNotFound(() -> creditNoteService.create(TENANT, otherPolicy.id(),
+                new CreateCreditNoteRequest(cancellation.returnPremiumAmount(), "USD",
+                        "wrong policy", cancellation.id())));
+        assertNotFound(() -> creditNoteService.create(OTHER_TENANT, cancellation.policyId(),
+                new CreateCreditNoteRequest(cancellation.returnPremiumAmount(), "USD",
+                        "wrong tenant", cancellation.id())));
+        assertNotFound(() -> creditNoteService.create(TENANT, cancellation.policyId(),
+                new CreateCreditNoteRequest(cancellation.returnPremiumAmount(), "USD",
+                        "unknown cancellation", UUID.randomUUID())));
+
+        assertThat(creditNoteService.list(TENANT, cancellation.policyId())).isEmpty();
+        assertThat(countEvents("policy.credit-note.created")).isZero();
     }
 
     @Test
@@ -316,6 +509,8 @@ class CreditNoteServiceTest {
                  ORDER BY event_sequence
                 """, policy.id());
         assertThat(rows).extracting(row -> row.get("event_type")).containsExactly(
+                "policy.credit-note.created",
+                "policy.credit-note.created",
                 "policy.credit-note.issued",
                 "policy.credit-note.cancelled",
                 "policy.credit-note.applied");
@@ -352,6 +547,7 @@ class CreditNoteServiceTest {
                 .hasMessage("force rollback");
 
         assertThat(count("policy_credit_note")).isZero();
+        assertThat(countEvents("policy.credit-note.created")).isZero();
         assertThat(countEvents("policy.credit-note.issued")).isZero();
         assertThat(policyService.get(TENANT, policy.id()).version()).isEqualTo(versionBefore);
     }
@@ -857,6 +1053,29 @@ class CreditNoteServiceTest {
         assertThat(unchanged.creditedAmount()).isEqualByComparingTo("250.0000");
         assertThat(countEvents("policy.credit-note.reversed")).isZero();
         assertThat(policyService.get(TENANT, policy.id()).version()).isEqualTo(versionBefore);
+    }
+
+    private PolicyCancellation createCancellation(String policyNumber) {
+        Policy policy = createPolicy(policyNumber, new BigDecimal("120000.00"));
+        jdbc.update("""
+                INSERT INTO policy_insured
+                       (id, tenant_id, policy_id, party_id, insured_role, display_name,
+                        certificate_number, scope, effective_from, effective_to, status, created_at)
+                VALUES (?, ?, ?, ?, 'NAMED_INSURED', 'Acme Chemical Corporation',
+                        NULL, NULL, ?, ?, 'ACTIVE', ?)
+                """, UUID.randomUUID(), TENANT, policy.id(), PARTY, EFFECTIVE, EXPIRATION,
+                Timestamp.from(Instant.now()));
+        transition(policy.id(), "QUOTED");
+        transition(policy.id(), "BOUND");
+        transition(policy.id(), "ISSUED");
+        return cancellationService.cancel(TENANT, policy.id(),
+                new CancelPolicyRequest("PRO_RATA", "Insured sold the business",
+                        LocalDate.of(2026, 7, 2), 0, null, null), null, null).cancellation();
+    }
+
+    private Policy transition(UUID policyId, String status) {
+        return policyService.updateStatus(TENANT, policyId,
+                new UpdatePolicyStatusRequest(status, null, null), null);
     }
 
     private BillingPlanView createPlan(Policy policy) {

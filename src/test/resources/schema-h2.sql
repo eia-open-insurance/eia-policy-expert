@@ -6,6 +6,7 @@
 CREATE SEQUENCE IF NOT EXISTS policy_number_seq START 1;
 CREATE SEQUENCE IF NOT EXISTS policy_program_number_seq START 1;
 CREATE SEQUENCE IF NOT EXISTS policy_credit_note_number_seq START 1;
+CREATE SEQUENCE IF NOT EXISTS policy_cancellation_number_seq START 1;
 
 CREATE TABLE IF NOT EXISTS policy (
     id UUID PRIMARY KEY,
@@ -385,6 +386,7 @@ CREATE TABLE IF NOT EXISTS policy_cancellation (
     tenant_id UUID NOT NULL,
     policy_id UUID NOT NULL,
     policy_version_id UUID NOT NULL,
+    cancellation_number VARCHAR(32),
     cancellation_type VARCHAR(16) NOT NULL,
     reason VARCHAR(200) NOT NULL,
     effective_date DATE NOT NULL,
@@ -400,6 +402,8 @@ CREATE TABLE IF NOT EXISTS policy_cancellation (
     approved_by UUID,
     status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',
     created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    CONSTRAINT uq_policy_cancellation_number
+        UNIQUE (tenant_id, policy_id, cancellation_number),
     CONSTRAINT ck_policy_cancellation_type
         CHECK (cancellation_type IN ('FLAT', 'PRO_RATA', 'SHORT_RATE', 'NON_PAYMENT', 'VOID')),
     CONSTRAINT ck_policy_cancellation_status
@@ -411,6 +415,16 @@ CREATE TABLE IF NOT EXISTS policy_cancellation (
         AND earned_premium_amount >= 0 AND return_premium_amount >= 0
     )
 );
+
+-- H2-compatible copy of the additive cancellation-number migration. The
+-- nullable column keeps historical rows valid; the unique constraint treats
+-- nulls as distinct, matching PostgreSQL.
+ALTER TABLE policy_cancellation
+    ADD COLUMN IF NOT EXISTS cancellation_number VARCHAR(32);
+ALTER TABLE policy_cancellation
+    DROP CONSTRAINT IF EXISTS uq_policy_cancellation_number;
+ALTER TABLE policy_cancellation ADD CONSTRAINT uq_policy_cancellation_number
+    UNIQUE (tenant_id, policy_id, cancellation_number);
 
 CREATE INDEX IF NOT EXISTS idx_policy_cancellation_policy
     ON policy_cancellation (tenant_id, policy_id, created_at DESC);
@@ -545,10 +559,13 @@ CREATE TABLE IF NOT EXISTS policy_credit_note (
     issued_at TIMESTAMP WITH TIME ZONE,
     applied_at TIMESTAMP WITH TIME ZONE,
     applied_installment_id UUID,
+    cancellation_id UUID,
     reversed_at TIMESTAMP WITH TIME ZONE,
     reversal_reason VARCHAR(500),
     created_at TIMESTAMP WITH TIME ZONE NOT NULL,
     CONSTRAINT uq_policy_credit_note_number UNIQUE (policy_id, note_number),
+    CONSTRAINT uq_policy_credit_note_cancellation
+        UNIQUE (tenant_id, policy_id, cancellation_id),
     CONSTRAINT ck_policy_credit_note_amount CHECK (amount > 0),
     CONSTRAINT ck_policy_credit_note_reason
         CHECK (reason IS NULL OR CHAR_LENGTH(reason) <= 500),
@@ -564,14 +581,20 @@ CREATE TABLE IF NOT EXISTS policy_credit_note (
         CHECK (reversal_reason IS NULL OR CHAR_LENGTH(reversal_reason) <= 500)
 );
 
--- H2-compatible copy of the reversal migration: H2 accepts the same
--- ADD COLUMN IF NOT EXISTS and DROP/ADD CONSTRAINT forms.
+-- H2-compatible copy of the credit-note cancellation link and its idempotent
+-- migration. H2 has no partial unique index, but UNIQUE treats nulls as
+-- distinct, so only a real link is unique per tenant/policy.
+ALTER TABLE policy_credit_note
+    ADD COLUMN IF NOT EXISTS cancellation_id UUID;
 ALTER TABLE policy_credit_note
     ADD COLUMN IF NOT EXISTS applied_installment_id UUID;
 ALTER TABLE policy_credit_note
     ADD COLUMN IF NOT EXISTS reversed_at TIMESTAMP WITH TIME ZONE;
 ALTER TABLE policy_credit_note
     ADD COLUMN IF NOT EXISTS reversal_reason VARCHAR(500);
+ALTER TABLE policy_credit_note DROP CONSTRAINT IF EXISTS uq_policy_credit_note_cancellation;
+ALTER TABLE policy_credit_note ADD CONSTRAINT uq_policy_credit_note_cancellation
+    UNIQUE (tenant_id, policy_id, cancellation_id);
 ALTER TABLE policy_credit_note DROP CONSTRAINT IF EXISTS ck_policy_credit_note_status;
 ALTER TABLE policy_credit_note ADD CONSTRAINT ck_policy_credit_note_status
     CHECK (status IN ('DRAFT', 'ISSUED', 'APPLIED', 'CANCELLED', 'REVERSED'));
@@ -586,6 +609,8 @@ CREATE INDEX IF NOT EXISTS idx_policy_credit_note_policy
     ON policy_credit_note (tenant_id, policy_id, created_at DESC, note_number DESC);
 CREATE INDEX IF NOT EXISTS idx_policy_credit_note_installment
     ON policy_credit_note (tenant_id, applied_installment_id);
+CREATE INDEX IF NOT EXISTS idx_policy_credit_note_cancellation
+    ON policy_credit_note (tenant_id, cancellation_id);
 
 -- H2-compatible copy of the mass tort profile table. The unique policy_id is
 -- the upsert arbiter and the CHECK constraints mirror the PostgreSQL DDL.

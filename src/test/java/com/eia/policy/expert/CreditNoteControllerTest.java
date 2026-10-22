@@ -75,6 +75,25 @@ class CreditNoteControllerTest {
     }
 
     @Test
+    void acceptsTheCancellationIdAndReturnsTheLink() throws Exception {
+        UUID cancellationId = UUID.fromString("88888888-8888-7888-8888-888888888888");
+        when(service.create(eq(TENANT), eq(POLICY_ID),
+                argThat(request -> cancellationId.equals(request.cancellationId()))))
+                .thenReturn(linkedNote(cancellationId));
+
+        mvc.perform(post("/api/v1/policies/{policyId}/credit-notes", POLICY_ID)
+                        .param("tenantId", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"amount":1500.50,"currency":"USD","reason":"cancellation refund",
+                                 "cancellationId":"%s"}
+                                """.formatted(cancellationId)))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.cancellationId").value(cancellationId.toString()))
+                .andExpect(jsonPath("$.cancellationNumber").value("CX-0000001"));
+    }
+
+    @Test
     void rejectsANonPositiveAmount() throws Exception {
         mvc.perform(post("/api/v1/policies/{policyId}/credit-notes", POLICY_ID)
                         .param("tenantId", TENANT.toString())
@@ -264,6 +283,12 @@ class CreditNoteControllerTest {
         return new PolicyCreditNote(NOTE_ID, TENANT, POLICY_ID, "CN-0000001",
                 new BigDecimal("1500.5000"), "USD", "adjustment", status, issuedAt, appliedAt,
                 appliedInstallmentId, CREATED);
+    }
+
+    private static PolicyCreditNote linkedNote(UUID cancellationId) {
+        return new PolicyCreditNote(NOTE_ID, TENANT, POLICY_ID, "CN-0000001",
+                new BigDecimal("1500.5000"), "USD", "cancellation refund", "DRAFT", null, null,
+                null, CREATED, null, null, cancellationId, "CX-0000001");
     }
 
     private static PolicyCreditNote reversedNote() {

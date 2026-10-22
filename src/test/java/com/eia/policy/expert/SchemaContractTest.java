@@ -248,6 +248,30 @@ class SchemaContractTest {
     }
 
     @Test
+    void schemaLinksACreditNoteToAtMostOneCancellationWithIdempotentDdl() throws Exception {
+        String schema = schema();
+
+        assertThat(schema).contains("cancellation_id UUID");
+        assertThat(schema).contains(
+                "ALTER TABLE policy_credit_note\n"
+                        + "    ADD COLUMN IF NOT EXISTS cancellation_id UUID");
+        assertThat(schema).contains(
+                "CONSTRAINT uq_policy_credit_note_cancellation");
+        assertThat(schema).contains(
+                "UNIQUE (tenant_id, policy_id, cancellation_id)");
+        assertThat(schema).contains("idx_policy_credit_note_cancellation");
+
+        assertThat(schema).contains("CREATE SEQUENCE IF NOT EXISTS policy_cancellation_number_seq");
+        assertThat(schema).contains("cancellation_number VARCHAR(32)");
+        assertThat(schema).contains(
+                "ALTER TABLE policy_cancellation\n"
+                        + "    ADD COLUMN IF NOT EXISTS cancellation_number VARCHAR(32)");
+        assertThat(schema).contains("CONSTRAINT uq_policy_cancellation_number");
+        assertThat(schema).contains(
+                "UNIQUE (tenant_id, policy_id, cancellation_number)");
+    }
+
+    @Test
     void schemaMatchesThePlatformTransactionalOutbox() throws Exception {
         String schema = schema();
 

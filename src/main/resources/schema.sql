@@ -8,6 +8,7 @@
 CREATE SEQUENCE IF NOT EXISTS policy_number_seq START 1;
 CREATE SEQUENCE IF NOT EXISTS policy_program_number_seq START 1;
 CREATE SEQUENCE IF NOT EXISTS policy_credit_note_number_seq START 1;
+CREATE SEQUENCE IF NOT EXISTS policy_cancellation_number_seq START 1;
 
 CREATE TABLE IF NOT EXISTS policy (
     id UUID PRIMARY KEY,
@@ -439,6 +440,7 @@ CREATE TABLE IF NOT EXISTS policy_cancellation (
     tenant_id UUID NOT NULL,
     policy_id UUID NOT NULL,
     policy_version_id UUID NOT NULL,
+    cancellation_number VARCHAR(32),
     cancellation_type VARCHAR(16) NOT NULL,
     reason VARCHAR(200) NOT NULL,
     effective_date DATE NOT NULL,
@@ -454,6 +456,8 @@ CREATE TABLE IF NOT EXISTS policy_cancellation (
     approved_by UUID,
     status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',
     created_at TIMESTAMPTZ NOT NULL,
+    CONSTRAINT uq_policy_cancellation_number
+        UNIQUE (tenant_id, policy_id, cancellation_number),
     CONSTRAINT ck_policy_cancellation_type
         CHECK (cancellation_type IN ('FLAT', 'PRO_RATA', 'SHORT_RATE', 'NON_PAYMENT', 'VOID')),
     CONSTRAINT ck_policy_cancellation_status
@@ -465,6 +469,18 @@ CREATE TABLE IF NOT EXISTS policy_cancellation (
         AND earned_premium_amount >= 0 AND return_premium_amount >= 0
     )
 );
+
+-- Additive migration for databases that already store cancellations. The
+-- business number is nullable for historical rows; every new cancellation gets
+-- a globally sequenced CX-{7 digits} number. PostgreSQL has no
+-- ADD CONSTRAINT IF NOT EXISTS, so the per-policy unique key is redefined on
+-- startup to stay idempotent.
+ALTER TABLE policy_cancellation
+    ADD COLUMN IF NOT EXISTS cancellation_number VARCHAR(32);
+ALTER TABLE policy_cancellation
+    DROP CONSTRAINT IF EXISTS uq_policy_cancellation_number;
+ALTER TABLE policy_cancellation ADD CONSTRAINT uq_policy_cancellation_number
+    UNIQUE (tenant_id, policy_id, cancellation_number);
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_policy_cancellation_active
     ON policy_cancellation (policy_id) WHERE status = 'ACTIVE';
@@ -625,10 +641,13 @@ CREATE TABLE IF NOT EXISTS policy_credit_note (
     issued_at TIMESTAMPTZ,
     applied_at TIMESTAMPTZ,
     applied_installment_id UUID,
+    cancellation_id UUID,
     reversed_at TIMESTAMPTZ,
     reversal_reason VARCHAR(500),
     created_at TIMESTAMPTZ NOT NULL,
     CONSTRAINT uq_policy_credit_note_number UNIQUE (policy_id, note_number),
+    CONSTRAINT uq_policy_credit_note_cancellation
+        UNIQUE (tenant_id, policy_id, cancellation_id),
     CONSTRAINT ck_policy_credit_note_amount CHECK (amount > 0),
     CONSTRAINT ck_policy_credit_note_reason
         CHECK (reason IS NULL OR CHAR_LENGTH(reason) <= 500),
@@ -645,14 +664,22 @@ CREATE TABLE IF NOT EXISTS policy_credit_note (
 );
 
 -- Additive migration for databases that already have the credit note table.
--- PostgreSQL has no ADD CONSTRAINT IF NOT EXISTS, so the status check is
--- dropped and re-added to admit REVERSED on an already-migrated database.
+-- The cancellation link is nullable (a note may be a general billing
+-- adjustment); the unique constraint treats nulls as distinct, so only a real
+-- cancellation link is unique per tenant/policy. PostgreSQL has no
+-- ADD CONSTRAINT IF NOT EXISTS, so the status and cancellation checks are
+-- dropped and re-added on startup to stay idempotent.
+ALTER TABLE policy_credit_note
+    ADD COLUMN IF NOT EXISTS cancellation_id UUID;
 ALTER TABLE policy_credit_note
     ADD COLUMN IF NOT EXISTS applied_installment_id UUID;
 ALTER TABLE policy_credit_note
     ADD COLUMN IF NOT EXISTS reversed_at TIMESTAMPTZ;
 ALTER TABLE policy_credit_note
     ADD COLUMN IF NOT EXISTS reversal_reason VARCHAR(500);
+ALTER TABLE policy_credit_note DROP CONSTRAINT IF EXISTS uq_policy_credit_note_cancellation;
+ALTER TABLE policy_credit_note ADD CONSTRAINT uq_policy_credit_note_cancellation
+    UNIQUE (tenant_id, policy_id, cancellation_id);
 ALTER TABLE policy_credit_note DROP CONSTRAINT IF EXISTS ck_policy_credit_note_status;
 ALTER TABLE policy_credit_note ADD CONSTRAINT ck_policy_credit_note_status
     CHECK (status IN ('DRAFT', 'ISSUED', 'APPLIED', 'CANCELLED', 'REVERSED'));
@@ -667,6 +694,8 @@ CREATE INDEX IF NOT EXISTS idx_policy_credit_note_policy
     ON policy_credit_note (tenant_id, policy_id, created_at DESC, note_number DESC);
 CREATE INDEX IF NOT EXISTS idx_policy_credit_note_installment
     ON policy_credit_note (tenant_id, applied_installment_id);
+CREATE INDEX IF NOT EXISTS idx_policy_credit_note_cancellation
+    ON policy_credit_note (tenant_id, cancellation_id);
 
 -- Mass tort policy profile (SPEC 11.2.4 `policy_mass_tort_profile`). One row
 -- per policy; the unique policy_id is the upsert arbiter. A COMPLETE profile
