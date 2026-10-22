@@ -180,6 +180,26 @@ class SchemaContractTest {
     }
 
     @Test
+    void schemaDefinesTheProductCatalogWithTenantUniqueCodeAndLifecycleChecks()
+            throws Exception {
+        String schema = schema();
+
+        assertThat(schema).contains("CREATE TABLE IF NOT EXISTS product");
+        assertThat(schema).contains("product_code VARCHAR(32) NOT NULL");
+        assertThat(schema).contains("product_name VARCHAR(200) NOT NULL");
+        assertThat(schema).contains("product_line VARCHAR(32) NOT NULL");
+        assertThat(schema).contains("jurisdiction CHAR(2) NOT NULL");
+        assertThat(schema).contains("status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE'");
+        assertThat(schema).contains(
+                "CONSTRAINT uq_product_code UNIQUE (tenant_id, product_code)");
+        assertThat(schema).contains(
+                "'CGL', 'PRODUCTS_LIABILITY', 'UMBRELLA', 'EXCESS', 'OTHER'");
+        assertThat(schema).contains("CHECK (status IN ('ACTIVE', 'RETIRED'))");
+        assertThat(schema).contains("version INTEGER NOT NULL DEFAULT 0");
+        assertThat(schema).contains("idx_product_tenant_updated");
+    }
+
+    @Test
     void schemaDefinesUnderwritingSubmissionsWithPerTenantNumbersAndLifecycleChecks()
             throws Exception {
         String schema = schema();

@@ -23,6 +23,9 @@ management:
       exposure:
         include: health,info
 eia:
+  product:
+    seed:
+      enabled: ${EIA_PRODUCT_SEED_ENABLED:true}
   outbox:
     enabled: ${EIA_OUTBOX_ENABLED:false}
     endpoint: ${EIA_OUTBOX_ENDPOINT:}

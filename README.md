@@ -72,6 +72,11 @@ contract structures from SPEC 11.2:
   jurisdiction, optional regulator and license number, and ACTIVE/INACTIVE
   status. `policy.legal_entity_id` is a nullable FK to the catalog, so a policy
   can be assigned to or cleared from one issuing legal entity.
+- `product`: the sellable product catalog (`CGL`, `PRODUCTS_LIABILITY`,
+  `UMBRELLA`, `EXCESS`, `OTHER`) with a tenant-unique upper-case `product_code`,
+  a 200-character `product_name`, a two-letter `jurisdiction`, and ACTIVE/RETIRED
+  status. The demo tenant is seeded idempotently with Commercial General
+  Liability, Products Liability, and Umbrella, all in the US.
 - `underwriting_submission`: tenant-owned intake records with a per-tenant
   `SUB-{YYYY}-{7 digits}` number, applicant/product/requested term and limit,
   a PostgreSQL `text[]` of tort codes, optional notes, and the
@@ -90,7 +95,8 @@ contract structures from SPEC 11.2:
   `credit-note.applied`, `credit-note.cancelled`, `credit-note.reversed`,
   `program.created`, `policy.program-assigned`, `legal-entity.created`,
   `policy.legal-entity-assigned`, `submission.created`,
-  `submission.status-changed`), with conditional Quartz HTTP dispatch.
+  `submission.status-changed`, `product.product.created`,
+  `product.product.status-changed`), with conditional Quartz HTTP dispatch.
 
 Every second-slice mutation accepts an optional `If-Match` strong entity tag
 (the aggregate `version`), returns the new `ETag`, and accepts an optional
@@ -293,6 +299,34 @@ aggregate; assignment and clearing write
 `policy.policy.legal-entity-assigned` with `legalEntityId` set or `null` in the
 same transaction as the policy version bump. A legal entity id from another
 tenant is a `404 LEGAL_ENTITY_NOT_FOUND`.
+
+The product catalog is exposed under `/api/v1/products` (the same controller
+keeps the `/internal/v1` alias for the domain adapter):
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/v1/products` | Tenant-scoped product list; optional `q` (case-insensitive product code/name substring) and `status` (`ACTIVE` or `RETIRED`) filters |
+| `POST` | `/api/v1/products` | Create an ACTIVE product; `201` with the product and its `ETag` |
+| `GET` | `/api/v1/products/{id}` | One product with its `ETag`; `404 PRODUCT_NOT_FOUND` |
+| `PATCH` | `/api/v1/products/{id}/status` | Set `{status}` to `ACTIVE` or `RETIRED`; returns the updated product and its new `ETag` |
+
+The create body is `{productCode, productName, productLine, jurisdiction}`. The
+code is trimmed, upper-cased, capped at 32 characters, and unique per tenant, so
+a duplicate is `409 DUPLICATE_PRODUCT_CODE`; the name is trimmed and capped at
+200; `productLine` is one of `CGL`, `PRODUCTS_LIABILITY`, `UMBRELLA`, `EXCESS`,
+or `OTHER` (case-insensitive, stored upper-case); and `jurisdiction` is a
+two-letter ISO 3166-1 alpha-2 code (stored upper-case). The tenant comes from
+`?tenantId=` or `X-EIA-Tenant`; the route is fixed to the DIRECT book. A
+product is created `ACTIVE`; `PATCH` retires or reactivates it, and replaying
+the current status is an idempotent no-op. Every accepted create and status
+change writes `product.product.created` or `product.product.status-changed`
+against the `Product` aggregate in the same transaction.
+
+The demo tenant `11111111-1111-7111-8111-111111111111` is seeded idempotently
+at startup with `CGL`/Commercial General Liability, `PRODUCTS_LIABILITY`/
+Products Liability, and `UMBRELLA`/Umbrella, all in `US`. The seed is keyed by
+`(tenant_id, product_code)` and never overwrites an existing row; it is disabled
+in the test profile and can be turned off with `EIA_PRODUCT_SEED_ENABLED=false`.
 
 Underwriting submissions are exposed under `/api/v1/policies/submissions` (the
 same controller keeps the `/internal/v1` alias for the domain adapter):

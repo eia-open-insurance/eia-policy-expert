@@ -136,6 +136,30 @@ ALTER TABLE policy ADD CONSTRAINT fk_policy_legal_entity
 CREATE INDEX IF NOT EXISTS idx_policy_legal_entity
     ON policy (tenant_id, legal_entity_id);
 
+-- H2-compatible copy of the product catalog. The CHECK constraints mirror the
+-- PostgreSQL DDL; `version` is the internal status-changed aggregate sequence.
+CREATE TABLE IF NOT EXISTS product (
+    id UUID PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    product_code VARCHAR(32) NOT NULL,
+    product_name VARCHAR(200) NOT NULL,
+    product_line VARCHAR(32) NOT NULL,
+    jurisdiction CHAR(2) NOT NULL,
+    status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',
+    version INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    CONSTRAINT uq_product_code UNIQUE (tenant_id, product_code),
+    CONSTRAINT ck_product_line CHECK (product_line IN (
+        'CGL', 'PRODUCTS_LIABILITY', 'UMBRELLA', 'EXCESS', 'OTHER'
+    )),
+    CONSTRAINT ck_product_status CHECK (status IN ('ACTIVE', 'RETIRED')),
+    CONSTRAINT ck_product_jurisdiction CHECK (CHAR_LENGTH(jurisdiction) = 2)
+);
+
+CREATE INDEX IF NOT EXISTS idx_product_tenant_updated
+    ON product (tenant_id, updated_at DESC, id);
+
 -- H2-compatible copy of command idempotency with response replay. The
 -- operation scopes the key; response_json/response_status store the original
 -- successful response that a replay returns. request_hash is the canonical

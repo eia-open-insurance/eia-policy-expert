@@ -12,5 +12,8 @@ spring:
     auto-startup: false
     job-store-type: memory
 eia:
+  product:
+    seed:
+      enabled: false
   outbox:
     enabled: false

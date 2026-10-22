@@ -153,6 +153,34 @@ ALTER TABLE policy ADD CONSTRAINT fk_policy_legal_entity
 CREATE INDEX IF NOT EXISTS idx_policy_legal_entity
     ON policy (tenant_id, legal_entity_id);
 
+-- Product catalog (SPEC 11.2.14 `product`, narrowed to the requested slice).
+-- The code is unique per tenant and stored upper-case; the product line is the
+-- requested CGL/PRODUCTS_LIABILITY/UMBRELLA/EXCESS/OTHER taxonomy and the
+-- jurisdiction is a two-letter code. A product is created ACTIVE and can be
+-- retired and reactivated. `version` is the internal aggregate sequence used by
+-- the status-changed outbox event (create is version 0 -> event version 1).
+CREATE TABLE IF NOT EXISTS product (
+    id UUID PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    product_code VARCHAR(32) NOT NULL,
+    product_name VARCHAR(200) NOT NULL,
+    product_line VARCHAR(32) NOT NULL,
+    jurisdiction CHAR(2) NOT NULL,
+    status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',
+    version INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
+    CONSTRAINT uq_product_code UNIQUE (tenant_id, product_code),
+    CONSTRAINT ck_product_line CHECK (product_line IN (
+        'CGL', 'PRODUCTS_LIABILITY', 'UMBRELLA', 'EXCESS', 'OTHER'
+    )),
+    CONSTRAINT ck_product_status CHECK (status IN ('ACTIVE', 'RETIRED')),
+    CONSTRAINT ck_product_jurisdiction CHECK (CHAR_LENGTH(jurisdiction) = 2)
+);
+
+CREATE INDEX IF NOT EXISTS idx_product_tenant_updated
+    ON product (tenant_id, updated_at DESC, id);
+
 -- Command idempotency with response replay. The scope is
 -- (tenant, operation, key), so the same key can be reused for a different
 -- command. response_json stores the exact successful response a replay

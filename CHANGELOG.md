@@ -126,6 +126,25 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   `policy.policy.legal-entity-assigned` (policy aggregate, `legalEntityId` set
   or null) outbox events written in the same transaction as the catalog row or
   policy assignment.
+- Product catalog slice: idempotent `product` table with a tenant-unique
+  upper-case `product_code`, a 200-character `product_name`, the
+  `CGL`/`PRODUCTS_LIABILITY`/`UMBRELLA`/`EXCESS`/`OTHER` line vocabulary, a
+  two-letter jurisdiction, and `ACTIVE`/`RETIRED` status. The internal row
+  `version` orders the status-changed events.
+- `GET /api/v1/products?q=&status=`, `GET /api/v1/products/{id}`,
+  `POST /api/v1/products`, and `PATCH /api/v1/products/{id}/status` (each also
+  under `/internal/v1`) with tenant-header/query scoping and the DIRECT-book
+  gate. Search is a case-insensitive product-code/name substring; duplicate
+  codes are `409 DUPLICATE_PRODUCT_CODE`; retiring/reactivating is
+  `ACTIVE`/`RETIRED`, and replaying the current status is an idempotent no-op.
+- `product.product.created` and `product.product.status-changed` outbox events
+  written in the same transaction as the catalog row change. They use the
+  requested `product` vertical, which `eia-platform`'s `EventVerticals` registry
+  must admit before outbox dispatch reconstructs their envelopes.
+- Idempotent demo-tenant product seed: `CGL`/Commercial General Liability,
+  `PRODUCTS_LIABILITY`/Products Liability, and `UMBRELLA`/Umbrella, all in
+  `US`, keyed by `(tenant_id, product_code)`, never overwriting an existing row,
+  writing no events, and disabled by `eia.product.seed.enabled=false`.
 - Policy credit note slice: idempotent `policy_credit_note` table with a
   positive `numeric(19,4)` amount in the policy currency, an optional
   500-character reason, a per-policy unique `note_number`

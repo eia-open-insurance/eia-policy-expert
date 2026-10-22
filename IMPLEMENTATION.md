@@ -14,7 +14,9 @@ with tort, trigger, allocation, coverage block, and DRAFT/COMPLETE gating), a
 commercial program catalog slice (tenant-unique programs, optional positive
 capacity with its currency, derived used/utilization/policy-count reads, plus
 the nullable `policy.program_id` assignment), a legal entity catalog slice (tenant-unique
-upper-case codes plus the nullable `policy.legal_entity_id` assignment), and a
+upper-case codes plus the nullable `policy.legal_entity_id` assignment), a
+product catalog slice (tenant-unique upper-case codes, the requested five
+product lines, ACTIVE/RETIRED status, and an idempotent demo-tenant seed), and a
 credit note slice (DRAFT/ISSUED/APPLIED/CANCELLED/REVERSED billing adjustments
 with per-policy numbering, cancellation return-premium links, application to open
 installments, and credit reversal), and an underwriting submission slice
@@ -49,6 +51,8 @@ outbox (SPEC 7.5.1) in the same database transaction as the aggregate write.
 | `MassTortProfileController` / `MassTortProfileService` / `MassTortProfileRepository` | One-profile-per-policy upsert, COMPLETE gating, and the profile outbox event |
 | `PolicyProgramController` / `PolicyProgramService` / `PolicyProgramRepository` | Commercial program catalog, optional capacity with the derived usage projection, policy assignment/clear, and the program outbox events |
 | `LegalEntityController` / `LegalEntityService` / `LegalEntityRepository` | Legal entity catalog, policy assignment/clear, and the legal entity outbox events |
+| `ProductController` / `ProductService` / `ProductRepository` / `ProductEvents` | Product catalog, q/status reads, ACTIVE/RETIRED status changes, and the product outbox events |
+| `ProductSeeder` / `ProductSeedRunner` | Idempotent demo-tenant product seed and its conditional startup hook |
 | `UnderwritingSubmissionController` / `UnderwritingSubmissionService` / `UnderwritingSubmissionRepository` / `UnderwritingSubmissionNumberAllocator` | Tenant-numbered underwriting submissions, q/status reads, the one-way status graph, and the submission outbox events |
 | `SubmissionConversionService` / `ConvertSubmissionRequest` / `SubmissionConversionResult` | Quoted/bound submission conversion into a DRAFT policy, the `policy.submission_id` link, derived base coverage/limit, and idempotent replay of the linked policy |
 | `PolicyRules`, `VersionTimeline`, `CoverageRules`, `CancellationRules`, `CancellationMath`, `PartyRules`, `EndorsementRules`, `BillingRules`, `CreditNoteRules`, `MassTortProfileRules`, `ProgramRules`, `LegalEntityRules`, `RatingRules`, `UnderwritingSubmissionRules` | Pure invariants with focused unit tests |
@@ -90,6 +94,8 @@ aggregate change and the event row:
 | `PATCH /api/v1/policies/{id}/program` (also `/internal/v1` alias) | `policy.policy.program-assigned`; `programId` is null when the link is cleared, and every accepted command advances the policy version |
 | `POST /api/v1/legal-entities` (also `/internal/v1` alias) | `policy.legal-entity.created` against the `LegalEntity` aggregate |
 | `PATCH /api/v1/policies/{id}/legal-entity` (also `/internal/v1` alias) | `policy.policy.legal-entity-assigned`; `legalEntityId` is null when the link is cleared, and every accepted command advances the policy version |
+| `POST /api/v1/products` (also `/internal/v1` alias) | `product.product.created` against the `Product` aggregate |
+| `PATCH /api/v1/products/{id}/status` (also `/internal/v1` alias) | `product.product.status-changed`; the payload carries the previous and new status, and every accepted transition advances the row version |
 | `POST /api/v1/policies/submissions` (also `/internal/v1` alias) | `policy.submission.created` against the `UnderwritingSubmission` aggregate |
 | `PATCH /api/v1/policies/submissions/{id}/status` (also `/internal/v1` alias) | `policy.submission.status-changed`; the payload carries the previous and new status and the optional reason, and every accepted transition advances the submission version |
 | `POST /api/v1/policies/submissions/{id}/convert` (also `/internal/v1` alias) | `policy.submission.converted` against the `UnderwritingSubmission` aggregate, plus the normal `policy.policy.created` from policy creation; the payload carries `{submissionId, submissionNumber, policyId, policyNumber}` |
@@ -169,6 +175,19 @@ emitted against the `LegalEntity` aggregate (`aggregateVersion=1`, payload
 Neither name is listed in `eia-contracts/asyncapi/policy.yaml` or
 `event-catalog.yaml` yet, and the contract still marks `/legal-entities` as
 planned.
+
+The product catalog events use the requested `product.product.created` and
+`product.product.status-changed` names, which imply the `product` event
+vertical. The platform `EventVerticals` registry does not admit that vertical
+yet (`EventEnvelope` and `EventSubject` reject it), so these rows are written
+directly as `OutboxEvent`s with the canonical payload and header JSON; the
+stored event types and payloads are final. `OutboxEvent.toEnvelope()` and the
+HTTP dispatcher will reconstruct them once `eia-platform` adds `product` to
+`EventVerticals.ALL`. The created payload carries `productId`, `productCode`,
+`productName`, `productLine`, `jurisdiction`, `status`, `version`, `createdAt`,
+and `updatedAt`; the status-changed payload carries the same identity fields
+plus `previousStatus`, the new `version`/`updatedAt`, and
+`changedFields: ["status"]`. The demo seed writes no events.
 
 The underwriting submission events are additive too: `policy.submission.created`,
 `policy.submission.status-changed`, and `policy.submission.converted` are not
@@ -475,6 +494,14 @@ The live smoke is opt-in and requires PostgreSQL.
   `external_code_map` columns are not exposed. `jurisdiction` is a two-letter
   code as requested by this slice, while the wider SPEC model uses
   `domicile_country` (ISO 3166-1 alpha-3).
+- The product catalog is create/list/get plus ACTIVE/RETIRED status only. The
+  SPEC 11.2.14 `product_version`, `form_family`, effective dates, owner, and
+  the wider DRAFT/FILED/APPROVED/SUSPENDED lifecycle are not modelled; this
+  slice uses the requested CGL/PRODUCTS_LIABILITY/UMBRELLA/EXCESS/OTHER taxonomy
+  and two statuses. There is no product edit, delete, or policy-to-product
+  foreign key. The demo seed runs on startup unless `eia.product.seed.enabled`
+  is false, is idempotent by `(tenant_id, product_code)`, never overwrites an
+  existing row, and writes no events.
 - Credit notes expose the DRAFT/ISSUED/APPLIED/CANCELLED/REVERSED lifecycle,
   application to one open installment, and full reversal of an APPLIED note.
   There is no partial reversal or unapply-by-amount command, no GL/AR posting,
