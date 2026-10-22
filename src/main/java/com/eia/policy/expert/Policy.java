@@ -23,6 +23,11 @@ import java.util.UUID;
  * ({@code legal_entity}, SPEC 10.11.2 / 11.2.4 issuing legal entity). Assignment
  * is a policy command: it bumps the aggregate version and emits
  * {@code policy.policy.legal-entity-assigned}.</p>
+ *
+ * <p>{@code submissionId} is the nullable link to the underwriting submission
+ * that was converted into this policy (SPEC 11.2.14). It is written by the
+ * conversion command together with a version bump and is unique per tenant, so
+ * a submission can produce at most one policy.</p>
  */
 public record Policy(
         UUID id,
@@ -42,7 +47,8 @@ public record Policy(
         Instant updatedAt,
         UUID renewedFromPolicyId,
         UUID programId,
-        UUID legalEntityId
+        UUID legalEntityId,
+        UUID submissionId
 ) {
     /**
      * Compatibility constructor for policies that predate renewal lineage.
@@ -84,5 +90,21 @@ public record Policy(
         this(id, tenantId, policyNumber, productCode, insuredPartyId, status, effectiveDate,
                 expirationDate, premiumAmount, premiumCurrency, limitAmount, limitCurrency,
                 version, createdAt, updatedAt, renewedFromPolicyId, programId, null);
+    }
+
+    /**
+     * Compatibility constructor for policies that carry renewal, program, and
+     * legal-entity links but were not created by a submission conversion.
+     */
+    public Policy(UUID id, UUID tenantId, String policyNumber, String productCode,
+                  UUID insuredPartyId, String status, LocalDate effectiveDate,
+                  LocalDate expirationDate, BigDecimal premiumAmount, String premiumCurrency,
+                  BigDecimal limitAmount, String limitCurrency, int version, Instant createdAt,
+                  Instant updatedAt, UUID renewedFromPolicyId, UUID programId,
+                  UUID legalEntityId) {
+        this(id, tenantId, policyNumber, productCode, insuredPartyId, status, effectiveDate,
+                expirationDate, premiumAmount, premiumCurrency, limitAmount, limitCurrency,
+                version, createdAt, updatedAt, renewedFromPolicyId, programId, legalEntityId,
+                null);
     }
 }

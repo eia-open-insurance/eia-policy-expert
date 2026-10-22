@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS policy (
     renewed_from_policy_id UUID,
     program_id UUID,
     legal_entity_id UUID,
+    submission_id UUID,
     version INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL,
@@ -839,6 +840,25 @@ CREATE INDEX IF NOT EXISTS idx_underwriting_submission_tenant_updated
     ON underwriting_submission (tenant_id, updated_at DESC, id);
 CREATE INDEX IF NOT EXISTS idx_underwriting_submission_tenant_status
     ON underwriting_submission (tenant_id, status, updated_at DESC, id);
+
+-- Submission-to-policy conversion (SPEC 11.2.14). A converted policy records
+-- the submission it came from. The column is nullable so every pre-conversion
+-- policy keeps working and the ALTER is idempotent for already-migrated
+-- databases. The tenant-scoped unique constraint is the concurrency arbiter:
+-- at most one policy may be created from a submission. PostgreSQL and H2 both
+-- treat NULLs as distinct, so unconverted policies do not collide. The FK is
+-- dropped and re-added on startup because PostgreSQL has no
+-- ADD CONSTRAINT IF NOT EXISTS.
+ALTER TABLE policy ADD COLUMN IF NOT EXISTS submission_id UUID;
+ALTER TABLE policy DROP CONSTRAINT IF EXISTS fk_policy_submission;
+ALTER TABLE policy ADD CONSTRAINT fk_policy_submission
+    FOREIGN KEY (submission_id) REFERENCES underwriting_submission (id);
+ALTER TABLE policy DROP CONSTRAINT IF EXISTS uq_policy_submission;
+ALTER TABLE policy ADD CONSTRAINT uq_policy_submission
+    UNIQUE (tenant_id, submission_id);
+
+CREATE INDEX IF NOT EXISTS idx_policy_submission
+    ON policy (tenant_id, submission_id);
 
 -- Transactional outbox (SPEC 7.5.1). The canonical copy lives in
 -- eia-platform/libs/src/main/resources/db/outbox_event.sql; keep both in sync.

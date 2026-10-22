@@ -299,8 +299,9 @@ same controller keeps the `/internal/v1` alias for the domain adapter):
 |---|---|---|
 | `GET` | `/api/v1/policies/submissions` | Tenant-scoped submission list, newest update first; optional `q` (submission number/product/notes substring) and `status` filters |
 | `POST` | `/api/v1/policies/submissions` | Create a `RECEIVED` submission; `201` with the generated `submissionNumber` |
-| `GET` | `/api/v1/policies/submissions/{id}` | One submission; `404 SUBMISSION_NOT_FOUND` |
+| `GET` | `/api/v1/policies/submissions/{id}` | One submission; `404 SUBMISSION_NOT_FOUND`; `policyId` is populated after conversion |
 | `PATCH` | `/api/v1/policies/submissions/{id}/status` | Apply `{status, reason?}`; returns the updated submission with its new `ETag`, `409 INVALID_SUBMISSION_TRANSITION` for an out-of-order or terminal transition |
+| `POST` | `/api/v1/policies/submissions/{id}/convert` | Convert a `QUOTED` (or unlinked `BOUND`) submission into a `DRAFT` policy; `201` with the policy, `200 Idempotent-Replayed: true` when the linked policy already exists, `409 SUBMISSION_NOT_CONVERTIBLE` for any other status |
 
 The create body is `{applicantPartyId, productCode, requestedEffectiveDate,
 requestedLimitAmount, requestedLimitCurrency, tortCodes[], notes?}`. The product
@@ -321,6 +322,21 @@ transition bumps the submission version and writes
 `updatedAt`, `reason`). The optional reason is trimmed, capped at 500
 characters, and carried on the event as the audit explanation. A submission from
 another tenant is `404 SUBMISSION_NOT_FOUND`.
+
+`POST /api/v1/policies/submissions/{id}/convert` takes
+`{premiumAmount, premiumCurrency, expirationDate?}` and creates a `DRAFT` policy
+from the submission's applicant, product, requested effective date, and
+requested limit, with the supplied premium and with `expirationDate` defaulting
+to the effective date plus one year. The policy gets the normal
+`POL-YYYY-NNNNNNN` number, an initial DRAFT version, and one base coverage and
+limit (code derived from the product code) when the requested limit is
+positive. The policy records `submissionId`, the submission becomes `BOUND`, both
+aggregate versions advance, and `policy.submission.converted` carries
+`{submissionId, submissionNumber, policyId, policyNumber}` in the same
+transaction. A conversion retry returns the existing policy with `200` and
+`Idempotent-Replayed: true` instead of creating a second policy. Only `QUOTED`
+and `BOUND` submissions are convertible; every other status is
+`409 SUBMISSION_NOT_CONVERTIBLE`.
 
 Credit notes are exposed under `/api/v1/policies/{policyId}/credit-notes` (the
 same controller keeps the `/internal/v1` alias for the domain adapter):

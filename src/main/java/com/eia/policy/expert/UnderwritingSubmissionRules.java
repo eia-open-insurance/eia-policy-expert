@@ -107,17 +107,88 @@ final class UnderwritingSubmissionRules {
     }
 
     /**
+     * A submission can be converted once it has been priced. BOUND is accepted
+     * so a retry of an already-converted submission can resolve to its existing
+     * policy instead of failing the state check.
+     */
+    static boolean isConvertible(String status) {
+        return QUOTED.equals(status) || BOUND.equals(status);
+    }
+
+    /**
+     * Normalizes and validates one conversion body. The submission supplies
+     * the applicant, product, effective date, and limit; the body supplies the
+     * premium and the optional expiration. A missing expiration defaults to one
+     * year after the requested effective date. A provided expiration must be
+     * strictly after the effective date so the derived coverage window is valid.
+     */
+    static ConversionSpec validateConversion(UnderwritingSubmission submission,
+                                             ConvertSubmissionRequest request) {
+        if (request == null) {
+            throw PolicyErrors.badRequest("INVALID_SUBMISSION_CONVERSION", "premiumAmount",
+                    "A conversion request is required.");
+        }
+        BigDecimal premiumAmount = normalizePremiumAmount(request.premiumAmount());
+        String premiumCurrency = normalizeCurrency(request.premiumCurrency(),
+                "premiumCurrency", "INVALID_CONVERSION_CURRENCY");
+        // The submission product code allows 64 characters, while the policy
+        // column is 32. Reject the mismatch as a business rule rather than
+        // letting the policy insert fail at the database.
+        if (submission.productCode() != null && submission.productCode().length() > 32) {
+            throw PolicyErrors.businessRule("PRODUCT_CODE_TOO_LONG_FOR_POLICY", "productCode",
+                    "productCode must be at most 32 characters to convert to a policy.");
+        }
+        LocalDate expirationDate = normalizeConversionExpiration(
+                submission.requestedEffectiveDate(), request.expirationDate());
+        return new ConversionSpec(premiumAmount, premiumCurrency, expirationDate);
+    }
+
+    static BigDecimal normalizePremiumAmount(BigDecimal raw) {
+        if (raw == null) {
+            throw PolicyErrors.badRequest("INVALID_CONVERSION_PREMIUM", "premiumAmount",
+                    "premiumAmount is required.");
+        }
+        if (raw.signum() < 0) {
+            throw PolicyErrors.badRequest("INVALID_CONVERSION_PREMIUM", "premiumAmount",
+                    "premiumAmount must not be negative.");
+        }
+        return Money.of(raw);
+    }
+
+    /**
+     * The default term is one year from the requested effective date. An
+     * explicit expiration must be after the effective date, matching the
+     * coverage window rule used by the derived base coverage.
+     */
+    static LocalDate normalizeConversionExpiration(LocalDate effectiveDate,
+                                                   LocalDate expirationDate) {
+        LocalDate expiration = expirationDate == null
+                ? effectiveDate.plusYears(1)
+                : expirationDate;
+        if (!expiration.isAfter(effectiveDate)) {
+            throw PolicyErrors.badRequest("INVALID_CONVERSION_EXPIRATION", "expirationDate",
+                    "expirationDate must be after the requested effective date "
+                            + effectiveDate + ".");
+        }
+        return expiration;
+    }
+
+    /**
      * The currency must be a three-letter ISO 4217 code. It is trimmed and
      * stored upper-case, matching the policy money contract (SPEC 10.3).
      */
     static String normalizeCurrency(String raw) {
+        return normalizeCurrency(raw, "requestedLimitCurrency",
+                "INVALID_SUBMISSION_CURRENCY");
+    }
+
+    private static String normalizeCurrency(String raw, String field, String code) {
         String value = raw == null ? "" : raw.trim().toUpperCase(Locale.ROOT);
         boolean wellFormed = value.length() == CURRENCY_LENGTH
                 && value.chars().allMatch(character -> character >= 'A' && character <= 'Z');
         if (!wellFormed) {
-            throw PolicyErrors.badRequest("INVALID_SUBMISSION_CURRENCY",
-                    "requestedLimitCurrency",
-                    "requestedLimitCurrency must be a three-letter ISO 4217 code.");
+            throw PolicyErrors.badRequest(code, field,
+                    field + " must be a three-letter ISO 4217 code.");
         }
         return value;
     }
@@ -224,6 +295,14 @@ final class UnderwritingSubmissionRules {
             String requestedLimitCurrency,
             List<String> tortCodes,
             String notes
+    ) {
+    }
+
+    /** Normalized premium, currency, and term for one conversion command. */
+    record ConversionSpec(
+            BigDecimal premiumAmount,
+            String premiumCurrency,
+            LocalDate expirationDate
     ) {
     }
 }

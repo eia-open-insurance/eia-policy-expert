@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS policy (
     renewed_from_policy_id UUID,
     program_id UUID,
     legal_entity_id UUID,
+    submission_id UUID,
     version INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL,
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
@@ -738,6 +739,20 @@ CREATE INDEX IF NOT EXISTS idx_underwriting_submission_tenant_updated
     ON underwriting_submission (tenant_id, updated_at DESC, id);
 CREATE INDEX IF NOT EXISTS idx_underwriting_submission_tenant_status
     ON underwriting_submission (tenant_id, status, updated_at DESC, id);
+
+-- H2-compatible copy of the submission-to-policy link. H2 accepts the same
+-- idempotent ADD COLUMN/DROP CONSTRAINT/ADD CONSTRAINT forms, and UNIQUE
+-- treats nulls as distinct so only a converted policy claims a submission.
+ALTER TABLE policy ADD COLUMN IF NOT EXISTS submission_id UUID;
+ALTER TABLE policy DROP CONSTRAINT IF EXISTS fk_policy_submission;
+ALTER TABLE policy ADD CONSTRAINT fk_policy_submission
+    FOREIGN KEY (submission_id) REFERENCES underwriting_submission (id);
+ALTER TABLE policy DROP CONSTRAINT IF EXISTS uq_policy_submission;
+ALTER TABLE policy ADD CONSTRAINT uq_policy_submission
+    UNIQUE (tenant_id, submission_id);
+
+CREATE INDEX IF NOT EXISTS idx_policy_submission
+    ON policy (tenant_id, submission_id);
 
 -- H2-compatible copy of the PostgreSQL outbox table. JSON payloads are TEXT
 -- here; production DDL uses jsonb.

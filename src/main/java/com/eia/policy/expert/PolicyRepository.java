@@ -10,6 +10,10 @@ import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -21,7 +25,7 @@ public class PolicyRepository {
             SELECT id, tenant_id, policy_number, product_code, insured_party_id, status,
                    effective_date, expiration_date, premium_amount, premium_currency,
                    limit_amount, limit_currency, version, created_at, updated_at,
-                   renewed_from_policy_id, program_id, legal_entity_id
+                   renewed_from_policy_id, program_id, legal_entity_id, submission_id
               FROM policy
             """;
 
@@ -43,7 +47,8 @@ public class PolicyRepository {
             rs.getTimestamp("updated_at").toInstant(),
             rs.getObject("renewed_from_policy_id", UUID.class),
             rs.getObject("program_id", UUID.class),
-            rs.getObject("legal_entity_id", UUID.class)
+            rs.getObject("legal_entity_id", UUID.class),
+            rs.getObject("submission_id", UUID.class)
     );
 
     private final JdbcTemplate jdbc;
@@ -83,6 +88,41 @@ public class PolicyRepository {
         return jdbc.query(SELECT_COLUMNS + """
                  WHERE tenant_id = ? AND id = ?
                 """, MAPPER, tenantId, id).stream().findFirst();
+    }
+
+    /**
+     * Finds the policy created from one underwriting submission. The tenant is
+     * part of the predicate, so a submission id from another tenant is
+     * indistinguishable from an unconverted one.
+     */
+    public Optional<Policy> findBySubmissionId(UUID tenantId, UUID submissionId) {
+        return jdbc.query(SELECT_COLUMNS + """
+                 WHERE tenant_id = ? AND submission_id = ?
+                """, MAPPER, tenantId, submissionId).stream().findFirst();
+    }
+
+    /**
+     * Bulk projection lookup for the submission list: maps each converted
+     * submission id to its policy id with one tenant-scoped query.
+     */
+    public Map<UUID, UUID> findPolicyIdsBySubmissionIds(UUID tenantId,
+                                                        Collection<UUID> submissionIds) {
+        if (submissionIds == null || submissionIds.isEmpty()) {
+            return Map.of();
+        }
+        String placeholders = String.join(", ", Collections.nCopies(submissionIds.size(), "?"));
+        List<Object> args = new ArrayList<>(submissionIds.size() + 1);
+        args.add(tenantId);
+        args.addAll(submissionIds);
+        Map<UUID, UUID> policyIds = new HashMap<>();
+        for (Map<String, Object> row : jdbc.queryForList("""
+                SELECT submission_id, id
+                  FROM policy
+                 WHERE tenant_id = ? AND submission_id IN (%s)
+                """.formatted(placeholders), args.toArray())) {
+            policyIds.put((UUID) row.get("submission_id"), (UUID) row.get("id"));
+        }
+        return Map.copyOf(policyIds);
     }
 
     /** Compatibility create: generates the policy id in the repository. */
@@ -207,6 +247,21 @@ public class PolicyRepository {
                    SET legal_entity_id = ?, version = version + 1, updated_at = ?
                  WHERE tenant_id = ? AND id = ? AND version = ?
                 """, legalEntityId, Timestamp.from(now), tenantId, id, expectedVersion);
+    }
+
+    /**
+     * Records the source underwriting submission and bumps the aggregate
+     * version in one conditional statement. The tenant-scoped unique constraint
+     * on {@code submission_id} is the concurrency arbiter; zero affected rows
+     * means the policy changed after it was read.
+     */
+    public int assignSubmission(UUID tenantId, UUID id, UUID submissionId, int expectedVersion,
+                                Instant now) {
+        return jdbc.update("""
+                UPDATE policy
+                   SET submission_id = ?, version = version + 1, updated_at = ?
+                 WHERE tenant_id = ? AND id = ? AND version = ?
+                """, submissionId, Timestamp.from(now), tenantId, id, expectedVersion);
     }
 
     public Optional<CommandIdempotencyRecord> findCommandIdempotency(UUID tenantId, String scope,

@@ -211,6 +211,24 @@ class SchemaContractTest {
     }
 
     @Test
+    void schemaLinksAConvertedPolicyToItsSubmissionWithIdempotentDdl() throws Exception {
+        String schema = schema();
+
+        assertThat(schema).contains("submission_id UUID");
+        assertThat(schema).contains(
+                "ALTER TABLE policy ADD COLUMN IF NOT EXISTS submission_id UUID");
+        assertThat(schema).contains(
+                "ALTER TABLE policy DROP CONSTRAINT IF EXISTS fk_policy_submission");
+        assertThat(schema).contains(
+                "FOREIGN KEY (submission_id) REFERENCES underwriting_submission (id)");
+        assertThat(schema).contains(
+                "ALTER TABLE policy ADD CONSTRAINT uq_policy_submission\n"
+                        + "    UNIQUE (tenant_id, submission_id)");
+        assertThat(schema).contains(
+                "CREATE INDEX IF NOT EXISTS idx_policy_submission");
+    }
+
+    @Test
     void schemaDefinesDunningActionsWithTheLevelArbiter() throws Exception {
         String schema = schema();
 

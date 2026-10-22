@@ -50,6 +50,7 @@ outbox (SPEC 7.5.1) in the same database transaction as the aggregate write.
 | `PolicyProgramController` / `PolicyProgramService` / `PolicyProgramRepository` | Commercial program catalog, optional capacity with the derived usage projection, policy assignment/clear, and the program outbox events |
 | `LegalEntityController` / `LegalEntityService` / `LegalEntityRepository` | Legal entity catalog, policy assignment/clear, and the legal entity outbox events |
 | `UnderwritingSubmissionController` / `UnderwritingSubmissionService` / `UnderwritingSubmissionRepository` / `UnderwritingSubmissionNumberAllocator` | Tenant-numbered underwriting submissions, q/status reads, the one-way status graph, and the submission outbox events |
+| `SubmissionConversionService` / `ConvertSubmissionRequest` / `SubmissionConversionResult` | Quoted/bound submission conversion into a DRAFT policy, the `policy.submission_id` link, derived base coverage/limit, and idempotent replay of the linked policy |
 | `PolicyRules`, `VersionTimeline`, `CoverageRules`, `CancellationRules`, `CancellationMath`, `PartyRules`, `EndorsementRules`, `BillingRules`, `CreditNoteRules`, `MassTortProfileRules`, `ProgramRules`, `LegalEntityRules`, `RatingRules`, `UnderwritingSubmissionRules` | Pure invariants with focused unit tests |
 | `PolicyVersionHasher`, `VersionIssuer` | Canonical version snapshot hash and issuance |
 | `CommandIdempotency` | Per-command replay/conflict behaviour |
@@ -91,6 +92,7 @@ aggregate change and the event row:
 | `PATCH /api/v1/policies/{id}/legal-entity` (also `/internal/v1` alias) | `policy.policy.legal-entity-assigned`; `legalEntityId` is null when the link is cleared, and every accepted command advances the policy version |
 | `POST /api/v1/policies/submissions` (also `/internal/v1` alias) | `policy.submission.created` against the `UnderwritingSubmission` aggregate |
 | `PATCH /api/v1/policies/submissions/{id}/status` (also `/internal/v1` alias) | `policy.submission.status-changed`; the payload carries the previous and new status and the optional reason, and every accepted transition advances the submission version |
+| `POST /api/v1/policies/submissions/{id}/convert` (also `/internal/v1` alias) | `policy.submission.converted` against the `UnderwritingSubmission` aggregate, plus the normal `policy.policy.created` from policy creation; the payload carries `{submissionId, submissionNumber, policyId, policyNumber}` |
 
 Payloads carry `policyId`, `policyNumber`, `status`, `version`, the policy
 effective/expiration dates, premium and limit amounts as scale-4 decimal
@@ -168,17 +170,19 @@ Neither name is listed in `eia-contracts/asyncapi/policy.yaml` or
 `event-catalog.yaml` yet, and the contract still marks `/legal-entities` as
 planned.
 
-The underwriting submission events are additive too: `policy.submission.created`
-and `policy.submission.status-changed` are not listed in
-`eia-contracts/asyncapi/policy.yaml` or `event-catalog.yaml` yet. A submission
-is its own aggregate, so the rows carry `aggregateType=UnderwritingSubmission`
-and `aggregateVersion=1` on create (then one higher per accepted transition);
-the subject type is `underwriting-submission`. The created payload carries the
-submission number, applicant, product, requested date/limit/currency, tort
-codes, notes, `RECEIVED` status, and timestamps. The status-changed payload
-carries `submissionId`, `submissionNumber`, `applicantPartyId`, `productCode`,
-`previousStatus`, `status`, `version`, `updatedAt`, and `reason` (explicitly
-null when absent).
+The underwriting submission events are additive too: `policy.submission.created`,
+`policy.submission.status-changed`, and `policy.submission.converted` are not
+listed in `eia-contracts/asyncapi/policy.yaml` or `event-catalog.yaml` yet. A
+submission is its own aggregate, so the rows carry
+`aggregateType=UnderwritingSubmission` and `aggregateVersion=1` on create (then
+one higher per accepted transition or conversion); the subject type is
+`underwriting-submission`. The created payload carries the submission number,
+applicant, product, requested date/limit/currency, tort codes, notes, `RECEIVED`
+status, and timestamps. The status-changed payload carries `submissionId`,
+`submissionNumber`, `applicantPartyId`, `productCode`, `previousStatus`,
+`status`, `version`, `updatedAt`, and `reason` (explicitly null when absent).
+The converted payload carries exactly `submissionId`, `submissionNumber`,
+`policyId`, and `policyNumber`.
 
 The credit note events are additive too: `policy.credit-note.created`,
 `policy.credit-note.issued`, `policy.credit-note.applied`,
@@ -401,6 +405,39 @@ transition writes `policy.submission.status-changed` in the same transaction as
 the submission row, so a rollback leaves neither the aggregate change nor the
 event behind. Both event names are additive contract entries, reported above.
 
+## Submission-to-policy conversion
+
+`POST /api/v1/policies/submissions/{id}/convert` (also the `/internal/v1` alias)
+accepts `{premiumAmount, premiumCurrency, expirationDate?}`. The submission must
+be `QUOTED` or `BOUND`; `RECEIVED`, `REFERRED`, `DECLINED`, and `WITHDRAWN` are
+`409 SUBMISSION_NOT_CONVERTIBLE` with `submissionId` and `currentStatus` in
+`meta`. `premiumAmount` is required, non-negative, and normalized to four
+fraction digits; `premiumCurrency` is a three-letter ISO 4217 code stored
+upper-case; `expirationDate` defaults to the requested effective date plus one
+year and an explicit value must be strictly after that effective date
+(`400 INVALID_CONVERSION_EXPIRATION`).
+
+The command creates a normal `DRAFT` policy through the policy create path, so
+the server allocates `POL-{YYYY}-{7 digits}`, writes the initial DRAFT
+`policy_version`, and emits `policy.policy.created`. The policy takes the
+submission's applicant, product, requested effective date, and
+requested limit/currency, plus the command premium. When the requested limit is
+positive, conversion also writes one base coverage and its limit schedule using
+the same `CoverageRules` as the coverage command: the coverage code is derived
+from the product code, the term spans the policy, and the requested limit is both
+the each-occurrence and aggregate amount. A zero requested limit skips the
+coverage because a coverage requires a positive each-occurrence amount.
+
+`policy.submission_id` records the source submission and is unique per tenant,
+so a submission can produce at most one policy. The submission moves from
+`QUOTED` to `BOUND` (a `BOUND` submission without a policy is linked and its
+version still advances), and both aggregate versions bump. The policy, the
+submission transition, and `policy.submission.converted` commit together; the
+payload is `{submissionId, submissionNumber, policyId, policyNumber}`. A retry
+after success finds the linked policy and returns it with `200` and
+`Idempotent-Replayed: true` without writing a row or an event. The submission
+projection exposes the linked `policyId`.
+
 ## Verification
 
 ```powershell
@@ -476,11 +513,13 @@ The live smoke is opt-in and requires PostgreSQL.
   `CALCULATED`. Rating is not required before quote or bind, and the rating
   command has no `Idempotency-Key` replay (each accepted command appends a
   worksheet).
-- Underwriting submissions are an intake record only. The SPEC 11.2.14
-  `clearance`, `referral`, `underwriting_authority`, `declination`,
-  `policy_quote`, product/form library, eligibility rules, exposure/coverage
-  detail, and submission-to-policy conversion commands are not exposed. The
-  status vocabulary is the requested slice graph; the SPEC `CLEARANCE` and
-  `RATING` intermediate states are not modelled. There is no submission edit or
-  delete command, no status history table (the reason lives on the event), and
-  no `If-Match` or `Idempotency-Key` replay on the submission commands.
+- Underwriting submissions are an intake and conversion record only. The SPEC
+  11.2.14 `clearance`, `referral`, `underwriting_authority`, `declination`,
+  `policy_quote`, product/form library, eligibility rules, and
+  exposure/coverage detail are not exposed, and conversion writes one base
+  coverage rather than the submission's requested coverage schedule. The status
+  vocabulary is the requested slice graph; the SPEC `CLEARANCE` and `RATING`
+  intermediate states are not modelled. There is no submission edit or delete
+  command, no status history table (the reason lives on the event), and no
+  `If-Match` or `Idempotency-Key` replay on the submission commands (conversion
+  is idempotent by the linked policy rather than by a request key).

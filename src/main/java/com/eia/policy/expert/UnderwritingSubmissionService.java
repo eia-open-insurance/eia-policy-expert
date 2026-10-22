@@ -39,21 +39,25 @@ public class UnderwritingSubmissionService {
 
     private final UnderwritingSubmissionRepository repository;
     private final UnderwritingSubmissionNumberAllocator numberAllocator;
+    private final PolicyRepository policyRepository;
     private final OutboxRepository outbox;
     private final Clock clock;
 
     @Autowired
     public UnderwritingSubmissionService(UnderwritingSubmissionRepository repository,
                                          UnderwritingSubmissionNumberAllocator numberAllocator,
+                                         PolicyRepository policyRepository,
                                          OutboxRepository outbox) {
-        this(repository, numberAllocator, outbox, Clock.systemUTC());
+        this(repository, numberAllocator, policyRepository, outbox, Clock.systemUTC());
     }
 
     UnderwritingSubmissionService(UnderwritingSubmissionRepository repository,
                                   UnderwritingSubmissionNumberAllocator numberAllocator,
+                                  PolicyRepository policyRepository,
                                   OutboxRepository outbox, Clock clock) {
         this.repository = repository;
         this.numberAllocator = numberAllocator;
+        this.policyRepository = policyRepository;
         this.outbox = outbox;
         this.clock = clock;
     }
@@ -67,13 +71,21 @@ public class UnderwritingSubmissionService {
         String query = q == null || q.isBlank() ? null : q.trim();
         String statusFilter = status == null || status.isBlank()
                 ? null : UnderwritingSubmissionRules.normalizeStatus(status);
-        return repository.findAll(tenantId, query, statusFilter).stream()
-                .map(UnderwritingSubmissionView::of)
+        List<UnderwritingSubmission> submissions = repository.findAll(tenantId, query, statusFilter);
+        Map<UUID, UUID> policyIds = policyRepository.findPolicyIdsBySubmissionIds(tenantId,
+                submissions.stream().map(UnderwritingSubmission::id).toList());
+        return submissions.stream()
+                .map(submission -> UnderwritingSubmissionView.of(
+                        submission, policyIds.get(submission.id())))
                 .toList();
     }
 
     public UnderwritingSubmissionView get(UUID tenantId, UUID submissionId) {
-        return UnderwritingSubmissionView.of(requireSubmission(tenantId, submissionId));
+        UnderwritingSubmission submission = requireSubmission(tenantId, submissionId);
+        UUID policyId = policyRepository.findBySubmissionId(tenantId, submissionId)
+                .map(Policy::id)
+                .orElse(null);
+        return UnderwritingSubmissionView.of(submission, policyId);
     }
 
     /**

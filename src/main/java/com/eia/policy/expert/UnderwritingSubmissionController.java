@@ -31,10 +31,15 @@ import java.util.UUID;
         "/internal/v1/policies/submissions"
 })
 public class UnderwritingSubmissionController {
-    private final UnderwritingSubmissionService service;
+    private static final String IDEMPOTENT_REPLAYED = "Idempotent-Replayed";
 
-    public UnderwritingSubmissionController(UnderwritingSubmissionService service) {
+    private final UnderwritingSubmissionService service;
+    private final SubmissionConversionService conversionService;
+
+    public UnderwritingSubmissionController(UnderwritingSubmissionService service,
+                                            SubmissionConversionService conversionService) {
         this.service = service;
+        this.conversionService = conversionService;
     }
 
     @GetMapping
@@ -89,5 +94,30 @@ public class UnderwritingSubmissionController {
         return ResponseEntity.ok()
                 .eTag(Integer.toString(updated.version()))
                 .body(updated);
+    }
+
+    /**
+     * Converts a QUOTED (or BOUND) submission into its DRAFT policy. A new
+     * conversion is {@code 201}; replaying an already-converted submission is
+     * {@code 200} with {@code Idempotent-Replayed: true} and the same policy.
+     * The body supplies the premium and optional expiration; all other terms
+     * come from the submission.
+     */
+    @PostMapping("/{id}/convert")
+    public ResponseEntity<Policy> convert(
+            @PathVariable UUID id,
+            @RequestParam(value = "tenantId", required = false) UUID tenantId,
+            @RequestHeader(value = RequestScope.TENANT_HEADER, required = false)
+            String tenantHeader,
+            @RequestHeader(value = RequestScope.BOOK_HEADER, required = false) String book,
+            @Valid @RequestBody ConvertSubmissionRequest request) {
+        RequestScope.requireDirectBook(book);
+        SubmissionConversionResult result = conversionService.convert(
+                RequestScope.tenant(tenantId, tenantHeader), id, request);
+        HttpStatus status = result.replayed() ? HttpStatus.OK : HttpStatus.CREATED;
+        return ResponseEntity.status(status)
+                .eTag(Integer.toString(result.policy().version()))
+                .header(IDEMPOTENT_REPLAYED, Boolean.toString(result.replayed()))
+                .body(result.policy());
     }
 }

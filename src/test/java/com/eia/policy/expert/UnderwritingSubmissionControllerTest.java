@@ -36,6 +36,8 @@ class UnderwritingSubmissionControllerTest {
             UUID.fromString("22222222-2222-7222-8222-222222222222");
     private static final UUID SUBMISSION_ID =
             UUID.fromString("44444444-4444-7444-8444-444444444444");
+    private static final UUID POLICY_ID =
+            UUID.fromString("55555555-5555-7555-8555-555555555555");
     private static final LocalDate EFFECTIVE = LocalDate.of(2026, 11, 1);
     private static final Instant CREATED = Instant.parse("2026-10-22T12:00:00Z");
     private static final String CREATE_BODY = """
@@ -50,6 +52,9 @@ class UnderwritingSubmissionControllerTest {
 
     @MockitoBean
     private UnderwritingSubmissionService service;
+
+    @MockitoBean
+    private SubmissionConversionService conversionService;
 
     @Test
     void createsASubmissionUnderThePublicPath() throws Exception {
@@ -276,10 +281,90 @@ class UnderwritingSubmissionControllerTest {
                 .andExpect(jsonPath("$.errors[0].field").value("status"));
     }
 
+    @Test
+    void convertsASubmissionAndReturnsTheCreatedDraftPolicy() throws Exception {
+        when(conversionService.convert(eq(TENANT), eq(SUBMISSION_ID),
+                any(ConvertSubmissionRequest.class)))
+                .thenReturn(new SubmissionConversionResult(policy(1), view("BOUND", 3), false));
+
+        mvc.perform(post("/api/v1/policies/submissions/{id}/convert", SUBMISSION_ID)
+                        .param("tenantId", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"premiumAmount\":125000,\"premiumCurrency\":\"USD\"}"))
+                .andExpect(status().isCreated())
+                .andExpect(header().string("ETag", "\"1\""))
+                .andExpect(header().string("Idempotent-Replayed", "false"))
+                .andExpect(jsonPath("$.id").value(POLICY_ID.toString()))
+                .andExpect(jsonPath("$.policyNumber").value("POL-2026-0000001"))
+                .andExpect(jsonPath("$.status").value("DRAFT"))
+                .andExpect(jsonPath("$.submissionId").value(SUBMISSION_ID.toString()))
+                .andExpect(jsonPath("$.premiumAmount").value("125000.0000"));
+
+        ArgumentCaptor<ConvertSubmissionRequest> captor =
+                ArgumentCaptor.forClass(ConvertSubmissionRequest.class);
+        verify(conversionService).convert(eq(TENANT), eq(SUBMISSION_ID), captor.capture());
+        assertThat(captor.getValue().premiumAmount()).isEqualByComparingTo("125000");
+        assertThat(captor.getValue().premiumCurrency()).isEqualTo("USD");
+        assertThat(captor.getValue().expirationDate()).isNull();
+    }
+
+    @Test
+    void replaysAConversionAsOkWithTheExistingPolicy() throws Exception {
+        when(conversionService.convert(eq(TENANT), eq(SUBMISSION_ID),
+                any(ConvertSubmissionRequest.class)))
+                .thenReturn(new SubmissionConversionResult(policy(1), view("BOUND", 3), true));
+
+        mvc.perform(post("/api/v1/policies/submissions/{id}/convert", SUBMISSION_ID)
+                        .param("tenantId", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"premiumAmount\":125000,\"premiumCurrency\":\"USD\"}"))
+                .andExpect(status().isOk())
+                .andExpect(header().string("ETag", "\"1\""))
+                .andExpect(header().string("Idempotent-Replayed", "true"))
+                .andExpect(jsonPath("$.id").value(POLICY_ID.toString()));
+    }
+
+    @Test
+    void rejectsAConversionWithoutAPremiumBeforeTheService() throws Exception {
+        mvc.perform(post("/api/v1/policies/submissions/{id}/convert", SUBMISSION_ID)
+                        .param("tenantId", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"premiumCurrency\":\"USD\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.errors[0].field").value("premiumAmount"));
+
+        verifyNoInteractions(conversionService);
+    }
+
+    @Test
+    void mapsANonConvertibleSubmissionToAConflict() throws Exception {
+        when(conversionService.convert(eq(TENANT), eq(SUBMISSION_ID),
+                any(ConvertSubmissionRequest.class)))
+                .thenThrow(PolicyErrors.conflict("SUBMISSION_NOT_CONVERTIBLE", "status",
+                        "Submission is RECEIVED.", java.util.Map.of(
+                                "currentStatus", "RECEIVED")));
+
+        mvc.perform(post("/api/v1/policies/submissions/{id}/convert", SUBMISSION_ID)
+                        .param("tenantId", TENANT.toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"premiumAmount\":125000,\"premiumCurrency\":\"USD\"}"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("SUBMISSION_NOT_CONVERTIBLE"))
+                .andExpect(jsonPath("$.meta.currentStatus").value("RECEIVED"));
+    }
+
     private static UnderwritingSubmissionView view(String status, int version) {
         return new UnderwritingSubmissionView(SUBMISSION_ID, "SUB-2026-0000001", APPLICANT,
                 "CGL_PRODUCTS", EFFECTIVE, new BigDecimal("2500000.0000"), "USD",
-                List.of("ASBESTOS", "PFAS"), status, "Large manufacturing risk", version,
-                CREATED, CREATED);
+                List.of("ASBESTOS", "PFAS"), status, POLICY_ID, "Large manufacturing risk",
+                version, CREATED, CREATED);
+    }
+
+    private static Policy policy(int version) {
+        return new Policy(POLICY_ID, TENANT, "POL-2026-0000001", "CGL_PRODUCTS", APPLICANT,
+                "DRAFT", EFFECTIVE, EFFECTIVE.plusYears(1), new BigDecimal("125000.0000"),
+                "USD", new BigDecimal("2500000.0000"), "USD", version, CREATED, CREATED,
+                null, null, null, SUBMISSION_ID);
     }
 }

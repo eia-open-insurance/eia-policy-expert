@@ -61,6 +61,7 @@ final class PolicyEvents {
     static final String LEGAL_ENTITY_ASSIGNED = "policy.policy.legal-entity-assigned";
     static final String SUBMISSION_CREATED = "policy.submission.created";
     static final String SUBMISSION_STATUS_CHANGED = "policy.submission.status-changed";
+    static final String SUBMISSION_CONVERTED = "policy.submission.converted";
 
     private static final Book EVENT_BOOK = Book.DIRECT;
     private static final String VERTICAL = "policy";
@@ -354,6 +355,27 @@ final class PolicyEvents {
         data.put("reason", reason == null ? NullNode.getInstance() : reason);
         return submissionEnvelope(after, SUBMISSION_STATUS_CHANGED, data,
                 after.version() + 1L, now);
+    }
+
+    /**
+     * Conversion closes the submission lifecycle and creates its policy. The
+     * payload is deliberately the four identity members a downstream
+     * policy-registration or document consumer needs: the submission side and
+     * the policy side. The submission aggregate version advances with the
+     * conversion, so the event is distinct from the status transitions that
+     * preceded it.
+     */
+    static EventEnvelope submissionConverted(UnderwritingSubmission submission, Policy policy,
+                                             Instant now) {
+        Objects.requireNonNull(submission, "submission");
+        Objects.requireNonNull(policy, "policy");
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("submissionId", submission.id());
+        data.put("submissionNumber", submission.submissionNumber());
+        data.put("policyId", policy.id());
+        data.put("policyNumber", policy.policyNumber());
+        return submissionEnvelope(submission, SUBMISSION_CONVERTED, data,
+                submission.version() + 1L, now);
     }
 
     private static Map<String, Object> submissionData(UnderwritingSubmission submission) {

@@ -237,6 +237,23 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   events written in the same transaction as the submission row; the
   status-changed payload carries the previous/new status, version, updated time,
   and optional reason.
+- Nullable `policy.submission_id` with an idempotent `ALTER`, an FK to
+  `underwriting_submission`, and a tenant-scoped unique constraint so a
+  submission can produce at most one policy.
+- `POST /api/v1/policies/submissions/{id}/convert` (also `/internal/v1`) accepts
+  `{premiumAmount, premiumCurrency, expirationDate?}` and creates a `DRAFT`
+  policy from the quoted submission: applicant/product/requested effective
+  date/requested limit, premium and currency from the command, and expiration
+  defaulting to effective + one year. Conversion allocates the normal policy
+  number, writes the initial DRAFT version, initializes one base coverage and
+  limit with the existing coverage rules, links `submissionId`, moves the
+  submission to `BOUND`, bumps both versions, and emits
+  `policy.submission.converted {submissionId, submissionNumber, policyId,
+  policyNumber}`. Only `QUOTED`/`BOUND` are convertible (`409
+  SUBMISSION_NOT_CONVERTIBLE`); a retry after success returns the linked policy
+  with `200 Idempotent-Replayed: true`.
+- The submission projection exposes `policyId` once conversion has linked a
+  policy.
 
 ### Fixed
 

@@ -67,6 +67,19 @@ public class UnderwritingSubmissionRepository {
     }
 
     /**
+     * Locks one submission for the conversion command. Conversion spans the
+     * submission status, the new policy row, and the outbox event, so the row
+     * lock serializes two concurrent conversions instead of letting both
+     * allocate a policy.
+     */
+    public Optional<UnderwritingSubmission> findByIdForUpdate(UUID tenantId, UUID id) {
+        return jdbc.query(SELECT_COLUMNS + """
+                 WHERE tenant_id = ? AND id = ?
+                   FOR UPDATE
+                """, MAPPER, tenantId, id).stream().findFirst();
+    }
+
+    /**
      * Tenant-scoped list with the optional free-text and status filters. The
      * free-text match is case-insensitive across the submission number, product
      * code, and notes. Ordering is stable: newest update first, id tie-breaker.
@@ -137,6 +150,20 @@ public class UnderwritingSubmissionRepository {
                  WHERE tenant_id = ? AND id = ? AND version = ? AND status = ?
                 """, targetStatus, Timestamp.from(updatedAt), tenantId, id, expectedVersion,
                 expectedStatus);
+    }
+
+    /**
+     * Bumps the version for a conversion that links a policy to a submission
+     * already in BOUND. No status value changes, but the aggregate state (the
+     * policy link) does, so the version still advances under the same
+     * optimistic predicate.
+     */
+    public int touch(UUID tenantId, UUID id, int expectedVersion, Instant updatedAt) {
+        return jdbc.update("""
+                UPDATE underwriting_submission
+                   SET version = version + 1, updated_at = ?
+                 WHERE tenant_id = ? AND id = ? AND version = ?
+                """, Timestamp.from(updatedAt), tenantId, id, expectedVersion);
     }
 
     private static List<String> tortCodes(ResultSet rs) throws SQLException {

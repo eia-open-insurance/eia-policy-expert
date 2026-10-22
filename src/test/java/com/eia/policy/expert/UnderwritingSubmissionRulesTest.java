@@ -258,4 +258,109 @@ class UnderwritingSubmissionRulesTest {
                 .satisfies(ex -> assertThat(((ApiException) ex).code())
                         .isEqualTo("INVALID_SUBMISSION_REASON"));
     }
+
+    @Test
+    void normalizesAConversionBodyAndDefaultsTheExpiration() {
+        UnderwritingSubmissionRules.ConversionSpec spec =
+                UnderwritingSubmissionRules.validateConversion(submission("QUOTED"),
+                        new ConvertSubmissionRequest(new BigDecimal("125000"), " usd ", null));
+
+        assertThat(spec.premiumAmount()).isEqualByComparingTo("125000.0000");
+        assertThat(spec.premiumAmount().scale()).isEqualTo(4);
+        assertThat(spec.premiumCurrency()).isEqualTo("USD");
+        assertThat(spec.expirationDate()).isEqualTo(EFFECTIVE.plusYears(1));
+    }
+
+    @Test
+    void acceptsAnExplicitConversionExpiration() {
+        LocalDate expiration = LocalDate.of(2028, 1, 15);
+
+        UnderwritingSubmissionRules.ConversionSpec spec =
+                UnderwritingSubmissionRules.validateConversion(submission("BOUND"),
+                        new ConvertSubmissionRequest(BigDecimal.ONE, "USD", expiration));
+
+        assertThat(spec.expirationDate()).isEqualTo(expiration);
+    }
+
+    @Test
+    void rejectsInvalidConversionPremiumAndCurrency() {
+        assertThatThrownBy(() -> UnderwritingSubmissionRules.validateConversion(
+                submission("QUOTED"), new ConvertSubmissionRequest(null, "USD", null)))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> assertThat(((ApiException) ex).code())
+                        .isEqualTo("INVALID_CONVERSION_PREMIUM"));
+        assertThatThrownBy(() -> UnderwritingSubmissionRules.validateConversion(
+                submission("QUOTED"),
+                new ConvertSubmissionRequest(new BigDecimal("-0.01"), "USD", null)))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> assertThat(((ApiException) ex).code())
+                        .isEqualTo("INVALID_CONVERSION_PREMIUM"));
+        assertThatThrownBy(() -> UnderwritingSubmissionRules.validateConversion(
+                submission("QUOTED"), new ConvertSubmissionRequest(BigDecimal.ONE, "US", null)))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException api = (ApiException) ex;
+                    assertThat(api.code()).isEqualTo("INVALID_CONVERSION_CURRENCY");
+                    assertThat(api.details()).extracting(ApiException.FieldIssue::field)
+                            .containsExactly("premiumCurrency");
+                });
+        assertThatThrownBy(() -> UnderwritingSubmissionRules.validateConversion(
+                submission("QUOTED"), null))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> assertThat(((ApiException) ex).code())
+                        .isEqualTo("INVALID_SUBMISSION_CONVERSION"));
+    }
+
+    @Test
+    void rejectsAnExpirationThatIsNotAfterTheEffectiveDate() {
+        assertThatThrownBy(() -> UnderwritingSubmissionRules.validateConversion(
+                submission("QUOTED"),
+                new ConvertSubmissionRequest(BigDecimal.ONE, "USD", EFFECTIVE)))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException api = (ApiException) ex;
+                    assertThat(api.status()).isEqualTo(org.springframework.http.HttpStatus.BAD_REQUEST);
+                    assertThat(api.code()).isEqualTo("INVALID_CONVERSION_EXPIRATION");
+                });
+    }
+
+    @Test
+    void rejectsAProductCodeThatDoesNotFitThePolicyColumn() {
+        UnderwritingSubmission longProduct = new UnderwritingSubmission(UUID.randomUUID(),
+                UUID.fromString("11111111-1111-7111-8111-111111111111"),
+                "SUB-2026-0000001", APPLICANT, "P".repeat(33), EFFECTIVE,
+                new BigDecimal("2500000.0000"), "USD", List.of(), "QUOTED", null, 0,
+                java.time.Instant.parse("2026-10-22T12:00:00Z"),
+                java.time.Instant.parse("2026-10-22T12:00:00Z"));
+
+        assertThatThrownBy(() -> UnderwritingSubmissionRules.validateConversion(
+                longProduct, new ConvertSubmissionRequest(BigDecimal.ONE, "USD", null)))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException api = (ApiException) ex;
+                    assertThat(api.status()).isEqualTo(
+                            org.springframework.http.HttpStatus.UNPROCESSABLE_ENTITY);
+                    assertThat(api.code()).isEqualTo("PRODUCT_CODE_TOO_LONG_FOR_POLICY");
+                });
+    }
+
+    @Test
+    void onlyQuotedAndBoundSubmissionsAreConvertible() {
+        assertThat(UnderwritingSubmissionRules.isConvertible("QUOTED")).isTrue();
+        assertThat(UnderwritingSubmissionRules.isConvertible("BOUND")).isTrue();
+        assertThat(UnderwritingSubmissionRules.isConvertible("RECEIVED")).isFalse();
+        assertThat(UnderwritingSubmissionRules.isConvertible("REFERRED")).isFalse();
+        assertThat(UnderwritingSubmissionRules.isConvertible("DECLINED")).isFalse();
+        assertThat(UnderwritingSubmissionRules.isConvertible("WITHDRAWN")).isFalse();
+        assertThat(UnderwritingSubmissionRules.isConvertible(null)).isFalse();
+    }
+
+    private static UnderwritingSubmission submission(String status) {
+        return new UnderwritingSubmission(UUID.randomUUID(),
+                UUID.fromString("11111111-1111-7111-8111-111111111111"),
+                "SUB-2026-0000001", APPLICANT, "CGL_PRODUCTS", EFFECTIVE,
+                new BigDecimal("2500000.0000"), "USD", List.of(), status, null, 0,
+                java.time.Instant.parse("2026-10-22T12:00:00Z"),
+                java.time.Instant.parse("2026-10-22T12:00:00Z"));
+    }
 }

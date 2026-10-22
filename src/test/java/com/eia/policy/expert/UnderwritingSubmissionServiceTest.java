@@ -50,11 +50,14 @@ class UnderwritingSubmissionServiceTest {
     private UnderwritingSubmissionNumberAllocator numberAllocator;
 
     @Mock
+    private PolicyRepository policyRepository;
+
+    @Mock
     private OutboxRepository outbox;
 
     private UnderwritingSubmissionService service() {
-        return new UnderwritingSubmissionService(repository, numberAllocator, outbox,
-                Clock.fixed(NOW, ZoneOffset.UTC));
+        return new UnderwritingSubmissionService(repository, numberAllocator, policyRepository,
+                outbox, Clock.fixed(NOW, ZoneOffset.UTC));
     }
 
     @Test
