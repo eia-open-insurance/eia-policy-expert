@@ -6,6 +6,7 @@ import org.springframework.http.HttpStatus;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.util.List;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -109,6 +110,59 @@ class CancellationRulesTest {
         assertThatThrownBy(() -> CancellationRules.requireSameCurrency("EUR", "USD"))
                 .isInstanceOf(ApiException.class)
                 .satisfies(ex -> assertThat(((ApiException) ex).code()).isEqualTo("CURRENCY_MISMATCH"));
+    }
+
+    @Test
+    void openLinkedCreditNotesBlockReinstatementWithTheirNumbers() {
+        for (String status : List.of("DRAFT", "ISSUED", "APPLIED")) {
+            assertThatThrownBy(() -> CancellationRules.requireNoOpenCreditNotes(
+                    List.of(creditNote("CN-0000001", status), creditNote("CN-0000002", status)),
+                    cancellation()))
+                    .isInstanceOf(ApiException.class)
+                    .satisfies(ex -> {
+                        ApiException api = (ApiException) ex;
+                        assertThat(api.status()).isEqualTo(HttpStatus.CONFLICT);
+                        assertThat(api.code()).isEqualTo("CANCELLATION_CREDIT_NOTE_OPEN");
+                        assertThat(api.getMessage())
+                                .contains("CN-0000001 (")
+                                .contains("CN-0000002 (")
+                                .contains("Cancel or reverse");
+                        assertThat(api.meta())
+                                .containsEntry("noteNumbers",
+                                        List.of("CN-0000001", "CN-0000002"))
+                                .containsKey("guidance");
+                    });
+        }
+    }
+
+    @Test
+    void closedLinkedCreditNotesDoNotBlockReinstatement() {
+        for (String status : List.of("CANCELLED", "REVERSED")) {
+            assertThatCode(() -> CancellationRules.requireNoOpenCreditNotes(
+                    List.of(creditNote("CN-0000001", status)), cancellation()))
+                    .doesNotThrowAnyException();
+        }
+    }
+
+    @Test
+    void noLinkedCreditNotesDoNotBlockReinstatement() {
+        assertThatCode(() -> CancellationRules.requireNoOpenCreditNotes(List.of(), cancellation()))
+                .doesNotThrowAnyException();
+    }
+
+    private static PolicyCreditNote creditNote(String noteNumber, String status) {
+        return new PolicyCreditNote(UUID.randomUUID(), TENANT, POLICY_ID, noteNumber,
+                new BigDecimal("60164.4000"), "USD", "cancellation return premium", status,
+                null, null, Instant.now());
+    }
+
+    private static PolicyCancellation cancellation() {
+        Instant now = Instant.parse("2026-07-02T00:00:00Z");
+        return new PolicyCancellation(UUID.randomUUID(), TENANT, POLICY_ID, UUID.randomUUID(),
+                "PRO_RATA", "Insured sold the business", LocalDate.of(2026, 7, 2), 0, now, 365,
+                183, new BigDecimal("0.501370"), new BigDecimal("59835.6000"),
+                new BigDecimal("60164.4000"), "USD", UUID.randomUUID(), UUID.randomUUID(),
+                "ACTIVE", now, "CX-0000001");
     }
 
     private static Policy policy(String status) {

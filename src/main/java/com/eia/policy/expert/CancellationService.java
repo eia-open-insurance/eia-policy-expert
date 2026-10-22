@@ -18,14 +18,17 @@ import java.util.UUID;
  * return premium computed from the policy term (SPEC POL-08). Reinstatement
  * restores coverage only after an approval reference and documented premium
  * evidence, issues a REINSTATEMENT version, and closes the active cancellation
- * (SPEC POL-09). Both commands write their outbox events in the same
- * transaction as the state change.</p>
+ * (SPEC POL-09). Reinstatement is refused while a credit note linked to the
+ * active cancellation is still open, so a return premium cannot be stranded by
+ * the policy coming back into force. Both commands write their outbox events
+ * in the same transaction as the state change.</p>
  */
 @Service
 public class CancellationService {
     private final PolicyRepository policyRepository;
     private final MutationGuard guard;
     private final CancellationRepository cancellationRepository;
+    private final CreditNoteRepository creditNoteRepository;
     private final PolicyVersionService versionService;
     private final VersionIssuer versionIssuer;
     private final EndorsementFactory endorsementFactory;
@@ -35,6 +38,7 @@ public class CancellationService {
     public CancellationService(PolicyRepository policyRepository,
                                MutationGuard guard,
                                CancellationRepository cancellationRepository,
+                               CreditNoteRepository creditNoteRepository,
                                PolicyVersionService versionService,
                                VersionIssuer versionIssuer,
                                EndorsementFactory endorsementFactory,
@@ -43,6 +47,7 @@ public class CancellationService {
         this.policyRepository = policyRepository;
         this.guard = guard;
         this.cancellationRepository = cancellationRepository;
+        this.creditNoteRepository = creditNoteRepository;
         this.versionService = versionService;
         this.versionIssuer = versionIssuer;
         this.endorsementFactory = endorsementFactory;
@@ -94,6 +99,12 @@ public class CancellationService {
                 .findActiveCancellation(tenantId, policyId)
                 .orElseThrow(() -> PolicyErrors.conflict("POLICY_NOT_CANCELLED", "status",
                         "The policy has no ACTIVE cancellation record to reinstate."));
+        // Read-only guard before any write: the credit notes linked to this
+        // cancellation must be closed, otherwise reinstatement and the refund
+        // would both be in flight for the same cancellation.
+        CancellationRules.requireNoOpenCreditNotes(
+                creditNoteRepository.findAllByCancellation(tenantId, policyId, cancellation.id()),
+                cancellation);
         CancellationRules.requireApproval(request.approvedBy(), request.approvalRef());
         CancellationRules.requirePremiumEvidence(request.premiumEvidenceRef(),
                 request.premiumEvidenceAmount());

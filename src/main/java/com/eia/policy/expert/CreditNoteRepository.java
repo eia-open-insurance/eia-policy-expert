@@ -89,9 +89,21 @@ public class CreditNoteRepository {
      */
     public Optional<PolicyCreditNote> findByCancellation(UUID tenantId, UUID policyId,
                                                          UUID cancellationId) {
+        return findAllByCancellation(tenantId, policyId, cancellationId).stream().findFirst();
+    }
+
+    /**
+     * Every note linked to a cancellation on this tenant and policy, oldest
+     * first. The cancellation link is unique per tenant/policy, but the
+     * reinstatement guard reads the whole set so a legacy row cannot slip past
+     * an arbitrary single-row lookup. A foreign tenant's note is invisible.
+     */
+    public List<PolicyCreditNote> findAllByCancellation(UUID tenantId, UUID policyId,
+                                                        UUID cancellationId) {
         return jdbc.query(SELECT_COLUMNS + """
                  WHERE cn.tenant_id = ? AND cn.policy_id = ? AND cn.cancellation_id = ?
-                """, MAPPER, tenantId, policyId, cancellationId).stream().findFirst();
+                 ORDER BY cn.note_number
+                """, MAPPER, tenantId, policyId, cancellationId);
     }
 
     public void insert(PolicyCreditNote creditNote) {

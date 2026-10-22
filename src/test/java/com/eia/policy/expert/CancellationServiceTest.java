@@ -3,6 +3,8 @@ package com.eia.policy.expert;
 import com.eia.platform.libs.outbox.OutboxRepository;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.http.HttpStatus;
@@ -10,15 +12,18 @@ import org.springframework.http.HttpStatus;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -36,6 +41,8 @@ class CancellationServiceTest {
     private MutationGuard guard;
     @Mock
     private CancellationRepository cancellationRepository;
+    @Mock
+    private CreditNoteRepository creditNoteRepository;
     @Mock
     private PolicyVersionService versionService;
     @Mock
@@ -185,10 +192,78 @@ class CancellationServiceTest {
                 any(), any());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"DRAFT", "ISSUED", "APPLIED"})
+    void reinstatementIsBlockedWhileTheLinkedCreditNoteIsOpen(String status) {
+        PolicyCancellation cancellation = cancellation();
+        when(guard.requirePolicy(TENANT, POLICY_ID, null)).thenReturn(policy("CANCELLED", 5));
+        when(cancellationRepository.findActiveCancellation(TENANT, POLICY_ID))
+                .thenReturn(Optional.of(cancellation));
+        when(creditNoteRepository.findAllByCancellation(TENANT, POLICY_ID, cancellation.id()))
+                .thenReturn(List.of(creditNote("CN-0000001", status)));
+
+        assertThatThrownBy(() -> service().reinstate(TENANT, POLICY_ID,
+                new ReinstatePolicyRequest(LocalDate.of(2026, 8, 1), "Premium received", APPROVER,
+                        APPROVAL, "RCPT-1", new BigDecimal("1000.00"), "USD"),
+                null, "guard-" + status))
+                .isInstanceOf(ApiException.class)
+                .satisfies(ex -> {
+                    ApiException api = (ApiException) ex;
+                    assertThat(api.status()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(api.code()).isEqualTo("CANCELLATION_CREDIT_NOTE_OPEN");
+                    assertThat(api.getMessage())
+                            .contains("CN-0000001")
+                            .contains("Cancel or reverse");
+                    assertThat(api.meta()).containsEntry("noteNumbers", List.of("CN-0000001"));
+                });
+
+        verify(cancellationRepository, never()).insertReinstatement(any());
+        verify(cancellationRepository, never()).markReinstated(any(), any(), any());
+        verify(policyRepository, never()).updateStatus(any(), any(), any(), any(), anyInt());
+        verifyNoInteractions(versionIssuer, endorsementFactory, outbox);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"CANCELLED", "REVERSED"})
+    void reinstatementProceedsAfterTheLinkedCreditNoteIsClosed(String status) {
+        PolicyCancellation cancellation = cancellation();
+        Policy policy = policy("CANCELLED", 5);
+        Policy reinstated = policy("REINSTATED", 6);
+        when(guard.requirePolicy(TENANT, POLICY_ID, null)).thenReturn(policy);
+        when(cancellationRepository.findActiveCancellation(TENANT, POLICY_ID))
+                .thenReturn(Optional.of(cancellation));
+        when(creditNoteRepository.findAllByCancellation(TENANT, POLICY_ID, cancellation.id()))
+                .thenReturn(List.of(creditNote("CN-0000001", status)));
+        when(versionService.currentOrNull(TENANT, POLICY_ID)).thenReturn(version());
+        when(versionIssuer.issue(eq(policy), any(), eq("REINSTATEMENT"), any(), any(), any(),
+                any(), any())).thenReturn(version());
+        when(cancellationRepository.markReinstated(TENANT, POLICY_ID, cancellation.id()))
+                .thenReturn(1);
+        when(policyRepository.updateStatus(TENANT, POLICY_ID, "REINSTATED", "Premium received", 5))
+                .thenReturn(reinstated);
+        when(policyRepository.findById(TENANT, POLICY_ID)).thenReturn(Optional.of(reinstated));
+
+        ReinstatementResult result = service().reinstate(TENANT, POLICY_ID,
+                new ReinstatePolicyRequest(LocalDate.of(2026, 8, 1), "Premium received", APPROVER,
+                        APPROVAL, "RCPT-1", new BigDecimal("1000.00"), "USD"), null, null);
+
+        assertThat(result.reinstatement().cancellationId()).isEqualTo(cancellation.id());
+        assertThat(result.policy().status()).isEqualTo("REINSTATED");
+        verify(cancellationRepository).insertReinstatement(any());
+        verify(outbox, org.mockito.Mockito.times(2)).insert(any());
+    }
+
     private CancellationService service() {
         return new CancellationService(policyRepository, guard, cancellationRepository,
-                versionService, versionIssuer, endorsementFactory,
+                creditNoteRepository, versionService, versionIssuer, endorsementFactory,
                 new CommandIdempotency(policyRepository), outbox);
+    }
+
+    private static PolicyCreditNote creditNote(String noteNumber, String status) {
+        Instant now = Instant.parse("2026-07-03T00:00:00Z");
+        return new PolicyCreditNote(UUID.randomUUID(), TENANT, POLICY_ID, noteNumber,
+                new BigDecimal("60164.4000"), "USD", "cancellation return premium", status,
+                null, null, now);
     }
 
     private static PolicyCancellation cancellation() {

@@ -124,6 +124,7 @@ final class Problems {
             Map.entry("INVALID_CREDIT_NOTE_REASON", "Invalid credit note reason"),
             Map.entry("INVALID_CREDIT_NOTE_STATUS", "Invalid credit note status"),
             Map.entry("INVALID_CREDIT_NOTE_TRANSITION", "Invalid credit note transition"),
+            Map.entry("CANCELLATION_CREDIT_NOTE_OPEN", "Cancellation credit note open"),
             Map.entry("MALFORMED_REQUEST", "Malformed request"),
             Map.entry("MISSING_PARAMETER", "Missing request parameter"),
             Map.entry("INVALID_PARAMETER", "Invalid request parameter"),
